@@ -1,0 +1,4260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Village Simulation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; }
+#panel {
+  display: none; position: fixed; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(8,8,16,0.82); color: #cfc8a0;
+  font: 13px/2 monospace; padding: 22px 30px;
+  border: 1px solid rgba(255,255,255,0.12); border-radius: 4px;
+  min-width: 230px; z-index: 10; user-select: none;
+  backdrop-filter: blur(4px);
+}
+#panel h2 { font-size: 11px; letter-spacing: 3px; margin-bottom: 10px;
+  opacity: 0.5; text-transform: uppercase; }
+#panel .row { display: flex; justify-content: space-between; gap: 24px; }
+#panel hr { border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 10px 0; }
+#panel button {
+  background: rgba(255,255,255,0.08); color: #cfc8a0;
+  border: 1px solid rgba(255,255,255,0.2); padding: 4px 14px;
+  cursor: pointer; font: 12px monospace; border-radius: 2px; margin-top: 4px;
+}
+#panel button:hover { background: rgba(255,255,255,0.18); }
+#panel .hint { font-size: 10px; opacity: 0.35; margin-top: 10px; }
+#esc-hint {
+  position: fixed; bottom: 12px; right: 14px;
+  color: rgba(255,255,255,0.22); font: 11px monospace; pointer-events: none;
+}
+#devcon {
+  display: none; position: fixed; top: 10px; left: 10px;
+  background: rgba(0,12,4,0.88); color: #80ff80;
+  font: 12px/1.6 monospace; padding: 14px 18px;
+  border: 1px solid rgba(0,255,80,0.25); border-radius: 3px;
+  min-width: 340px; max-width: 420px; z-index: 20;
+  backdrop-filter: blur(3px);
+}
+#devcon h2 { font-size: 10px; letter-spacing: 3px; opacity: 0.5;
+  text-transform: uppercase; margin-bottom: 8px; }
+#devcon #dcstats { font-size: 11px; white-space: pre; }
+#devcon #dcinput {
+  margin-top: 10px; width: 100%; box-sizing: border-box;
+  background: rgba(0,255,80,0.07); border: 1px solid rgba(0,255,80,0.3);
+  color: #80ff80; font: 12px monospace; padding: 4px 8px; outline: none;
+  border-radius: 2px;
+}
+#devcon #dclog { font-size: 11px; opacity: 0.7; min-height: 16px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <h2>Village</h2>
+  <div id="pstats"></div>
+  <hr>
+  <div><button id="sndBtn">Sound: ON</button></div>
+  <div><button id="resetBtn">Reset simulation</button></div>
+  <div id="resetConfirm" style="display:none; margin-top:8px; font-size:11px; color:#e09060;">
+    Are you sure? This cannot be undone.<br>
+    <button id="resetYes" style="margin-top:6px; color:#e09060; border-color:rgba(224,144,96,0.4);">Yes, reset</button>
+    <button id="resetNo"  style="margin-top:6px; margin-left:6px;">Cancel</button>
+  </div>
+  <div class="hint">Esc to close</div>
+</div>
+<div id="devcon">
+  <h2>Dev Console</h2>
+  <div id="dcstats"></div>
+  <input id="dcinput" type="text" placeholder="command…" autocomplete="off" spellcheck="false">
+  <div id="dclog"></div>
+</div>
+<div id="esc-hint">Esc — menu</div>
+<script>
+(function () {
+'use strict';
+
+// ── CONFIG ────────────────────────────────────────────────────────────────────
+const DAY_MS      = 120000;  // 2 minutes per full day cycle
+const GROUND_TOP  = 0.33;    // sky = top 33%; walkable ground = bottom 67%
+const CHURCH_POP  = 10;
+const FIRST_BATCH = 4;
+
+// ── CANVAS ────────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+let W = 0, H = 0;
+
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// World-space helpers.
+// nx ∈ [0,1] = horizontal, ny ∈ [0,1] = depth (0=far/top, 1=near/bottom).
+function skyH()      { return GROUND_TOP * H; }
+function gndH()      { return H - skyH(); }
+function worldY(ny)  { return skyH() + ny * gndH(); }
+
+// ── COLORS ───────────────────────────────────────────────────────────────────
+const C = {
+  SKY_NIGHT: ['#060614', '#0d1230'],
+  SKY_DAWN:  ['#d4603a', '#f0a050'],
+  SKY_DAY:   ['#2878c8', '#76bce8'],
+  SKY_DUSK:  ['#b83820', '#e06030'],
+  GND_NIGHT: '#141a08',
+  GND_DAWN:  '#2e4418',
+  GND_DAY:   '#4a7828',
+  GND_DUSK:  '#263810',
+  SUN:    '#ffe850',
+  MOON:   '#dce8f0',
+  STAR:   '#ffffff',
+  GRASS_L: '#5a8830', GRASS_D: '#2a4810',
+  TREE_TRUNK: '#4a2e10', TREE_MID: '#2a5010', TREE_LIGHT: '#3a6818',
+  WALL:    '#cca878', WALL_D:  '#906040',
+  ROOF:    '#7a2818', DOOR:    '#4a2808',
+  WIN_DAY: '#b8d0e8', WIN_LIT: '#f0d870',
+  CHIMNEY: '#706050',
+  CH_WALL: '#d8d0b8', CH_ROOF: '#484870', CROSS: '#b89840',
+  SKIN:    '#e8b878',
+  HAIR_BR: '#4a2810', HAIR_BL: '#c89020', HAIR_GR: '#888888',
+  SHIRT_M: '#2848a0', SHIRT_F: '#a02848', SHIRT_K: '#38a048',
+  PANTS:   '#383838', SKIRT:   '#b03060',
+  ROBE:    '#181818', COLLAR:  '#e8e8e8',
+  BIRD:    '#303030',
+  DRAGON:  '#283818', DRAGON_W: '#344820',
+  WIZ_ROBE:  '#1a0a3a', WIZ_HAT: '#2a0a5a', WIZ_HATD: '#160828',
+  WIZ_BEARD: '#d8d8d0', WIZ_STAFF: '#5a3a18', WIZ_ORB: '#80c0ff',
+};
+
+// ── DRAW HELPERS ─────────────────────────────────────────────────────────────
+function poly(pts, fill) {
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+}
+function box(x, y, w, h, fill) { ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); }
+function disk(x, y, r, fill)   { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fillStyle = fill; ctx.fill(); }
+function cap(x, y, r, fill)    { ctx.beginPath(); ctx.arc(x, y, r, Math.PI, 0); ctx.fillStyle = fill; ctx.fill(); }
+
+// ── NOISE HELPERS (stable seeded perturbation — no per-frame flicker) ────────
+function hash(n) {
+  n = (Math.imul((n>>16)^n, 0x45d9f3b)|0);
+  n = (Math.imul((n>>16)^n, 0x45d9f3b)|0);
+  return ((n>>16)^n & 0x7fffffff) / 0x7fffffff;
+}
+function srand(seed, i) { return hash(seed * 1009 + i); }
+function noisyPoly(pts, seed, amp, fill) {
+  const n = pts.map((p, i) => [
+    p[0] + (srand(seed, i*2)   - 0.5) * 2 * amp,
+    p[1] + (srand(seed, i*2+1) - 0.5) * 2 * amp,
+  ]);
+  poly(n, fill);
+}
+function noisyBox(x, y, w, h, seed, amp, fill) {
+  const pts = [
+    [x,     y    ], [x+w/2, y    ], [x+w,   y    ],
+    [x+w,   y+h/2], [x+w,   y+h  ],
+    [x+w/2, y+h  ], [x,     y+h  ],
+    [x,     y+h/2],
+  ];
+  noisyPoly(pts, seed, amp, fill);
+}
+
+// ── COLOR UTILITIES ──────────────────────────────────────────────────────────
+function hexRgb(h) { return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)]; }
+function lerp(a, b, t)    { return a + (b-a)*t; }
+function lerpHex(a, b, t) {
+  const [ar,ag,ab] = hexRgb(a), [br,bg,bb] = hexRgb(b);
+  return `rgb(${lerp(ar,br,t)|0},${lerp(ag,bg,t)|0},${lerp(ab,bb,t)|0})`;
+}
+function dimHex(hex, f) {
+  if (f >= 1) return hex;
+  const [r,g,b] = hexRgb(hex), d = 0.12 + f*0.88;
+  return `rgb(${r*d|0},${g*d|0},${b*d|0})`;
+}
+
+// ── TIME SYSTEM ──────────────────────────────────────────────────────────────
+let gameTime = 0;
+function tod()    { return (gameTime % DAY_MS) / DAY_MS; }
+function dayNum() { return Math.floor(gameTime / DAY_MS); }
+
+function ambientLight(t) {
+  const ph = [0.08, 0.55, 1.0, 0.55];
+  const i = (t*4)|0, n = (i+1)%4, f = (t*4)%1;
+  return lerp(ph[i], ph[n], f);
+}
+function skyColors(t) {
+  const ph = [C.SKY_NIGHT, C.SKY_DAWN, C.SKY_DAY, C.SKY_DUSK];
+  const i = (t*4)|0, n = (i+1)%4, f = (t*4)%1;
+  return [lerpHex(ph[i][0], ph[n][0], f), lerpHex(ph[i][1], ph[n][1], f)];
+}
+function groundColor(t) {
+  const ph = [C.GND_NIGHT, C.GND_DAWN, C.GND_DAY, C.GND_DUSK];
+  const i = (t*4)|0, n = (i+1)%4, f = (t*4)%1;
+  return lerpHex(ph[i], ph[n], f);
+}
+
+// ── STARS ────────────────────────────────────────────────────────────────────
+const STARS = Array.from({length:90}, () => ({
+  x: Math.random(), fy: Math.random()*0.94,
+  r: Math.random()*1.3+0.3, phase: Math.random()*Math.PI*2,
+}));
+function drawStars(light) {
+  if (light > 0.55) return;
+  const alpha = Math.max(0, 1 - light*1.8), sh = skyH();
+  STARS.forEach(s => {
+    ctx.globalAlpha = alpha * (0.6 + 0.4*Math.sin(s.phase + gameTime*0.002));
+    disk(s.x*W, s.fy*sh, s.r, C.STAR);
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ── SUN / MOON ───────────────────────────────────────────────────────────────
+function celestialPos(rise, set, t) {
+  const span = set > rise ? set-rise : (1-rise+set);
+  let rel;
+  if (set > rise) {
+    if (t < rise || t > set) return null;
+    rel = (t-rise)/span;
+  } else {
+    if      (t >= rise) rel = (t-rise)/span;
+    else if (t <= set)  rel = (1-rise+t)/span;
+    else                return null;
+  }
+  const sh = skyH(), ang = Math.PI*rel;
+  return [W*0.5 - Math.cos(ang)*W*0.42, sh - Math.sin(ang)*sh*0.88];
+}
+function drawSunMoon(t) {
+  const sp = celestialPos(0.22, 0.78, t);
+  const mp = celestialPos(0.72, 0.28, t);
+  if (sp) {
+    const g = ctx.createRadialGradient(...sp, 0, ...sp, 55);
+    g.addColorStop(0,'rgba(255,230,80,0.35)'); g.addColorStop(1,'rgba(255,230,80,0)');
+    ctx.fillStyle = g; ctx.fillRect(sp[0]-55, sp[1]-55, 110, 110);
+    disk(...sp, 17, C.SUN);
+    ctx.strokeStyle = C.SUN; ctx.lineWidth = 2;
+    for (let i = 0; i < 8; i++) {
+      const a = i*Math.PI/4;
+      ctx.beginPath();
+      ctx.moveTo(sp[0]+Math.cos(a)*22, sp[1]+Math.sin(a)*22);
+      ctx.lineTo(sp[0]+Math.cos(a)*32, sp[1]+Math.sin(a)*32);
+      ctx.stroke();
+    }
+  }
+  if (mp) {
+    disk(...mp, 13, C.MOON);
+    disk(mp[0]+5, mp[1]-2, 11, skyColors(t)[0]);
+  }
+}
+
+// ── BACKGROUND TREES (at horizon line) ───────────────────────────────────────
+const BG_TREES = Array.from({length:16}, (_, i) => ({
+  x: (i/16 + (i*0.037)%0.06),
+  h: 0.5 + Math.random()*0.5,
+})).sort((a,b) => a.x - b.x);
+
+function drawTrees(light) {
+  const horizon = skyH(), s = H/600;
+  BG_TREES.forEach((tr, i) => {
+    const tx = tr.x*W, th = 55*tr.h*s, tw = 20*tr.h*s, ty = horizon-th;
+    const trunk = light < 0.3 ? '#2a1a08' : C.TREE_TRUNK;
+    const top1  = light < 0.3 ? '#0e1e06' : C.TREE_MID;
+    const top2  = light < 0.3 ? '#121f08' : C.TREE_LIGHT;
+    noisyBox(tx-tw*0.12, ty+th*0.6, tw*0.24, th*0.4, i*13+2, 1.5*s, trunk);
+    noisyPoly([[tx,ty],[tx-tw,ty+th*0.72],[tx+tw,ty+th*0.72]], i*13, 3*s, top1);
+    noisyPoly([[tx,ty+th*0.28],[tx-tw*0.8,ty+th*0.95],[tx+tw*0.8,ty+th*0.95]], i*13+1, 3*s, top2);
+  });
+}
+
+// ── GROUND GRASS (scattered across 2-D field) ────────────────────────────────
+const GRASS_BLADES = Array.from({length:2500}, () => ({
+  nx: Math.random(),
+  ny: Math.random(),
+  h: 1.0 + Math.random() * 1.5,
+  w: 0.5 + Math.random() * 0.5,
+}));
+function drawGrass(light) {
+  const s = H/600, col = light < 0.25 ? C.GRASS_D : C.GRASS_L;
+  GRASS_BLADES.forEach((g, i) => {
+    const idx = trackIdx(g.nx, g.ny);
+    const wear = idx >= 0 ? trackWear[idx] : 0;
+    const wornFrac = Math.min(1, wear / TRACK_STRONG);
+    const gx = g.nx*W, gy = worldY(g.ny);
+
+    if (wornFrac < 1) {
+      // Green blade, fading as wear increases.
+      ctx.globalAlpha = 1 - wornFrac;
+      const tipX = gx + (srand(i*17, 0) - 0.5) * 2 * 1.2*s;
+      poly([[gx-g.w*s, gy],[gx+g.w*s, gy],[tipX, gy-g.h*s]], col);
+      ctx.globalAlpha = 1;
+    } else {
+      // Fully worn: replace with a small seeded earth mark for texture.
+      // Use Math.abs() on r-values to keep radii/sizes positive — srand() can return
+      // negative values (signed 32-bit hash), and ctx.arc() throws on negative radii.
+      const r0 = Math.abs(srand(i*23+1, 7)), r1 = Math.abs(srand(i*23+2, 7)), r2 = srand(i*23+3, 7);
+      if (r0 > 0.72) {
+        // Small pebble — grey-brown disk.
+        const pr  = (0.35 + r1 * 0.45) * s;
+        const pcol = dimHex(r1 > 0.5 ? '#8a8070' : '#706050', light);
+        disk(gx + (r2-0.5)*2*s, gy - pr*0.5, pr, pcol);
+      } else {
+        // Compressed-earth smudge — squat trapezoid in varied dirt tones.
+        const dc = dimHex(r0 > 0.36 ? '#8a6830' : '#6e5222', light);
+        const hw = g.w * (1.0 + r1*0.6) * s;
+        const hh = g.h * (0.18 + r2*0.14) * s;
+        ctx.save();
+        ctx.globalAlpha = 0.35 + r1*0.25;
+        poly([[gx-hw, gy],[gx+hw, gy],[gx+hw*0.55, gy-hh],[gx-hw*0.55, gy-hh]], dc);
+        ctx.restore();
+      }
+    }
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ── CLOUDS ────────────────────────────────────────────────────────────────────
+const CLOUDS = Array.from({length: 7}, (_, i) => ({
+  seed:  i,
+  baseNx: srand(i, 90),
+  ny:    0.08 + srand(i, 91) * 0.62,   // fraction of sky height from top
+  speed: 0.0000018 + srand(i, 92) * 0.0000016,
+  scale: 0.7 + srand(i, 93) * 0.9,
+}));
+function drawClouds(light) {
+  if (light < 0.28) return;
+  const alpha = Math.min(1, (light - 0.28) / 0.22) * 0.78;
+  const sh = skyH();
+  ctx.save();
+  ctx.fillStyle = '#f6f6f4';
+  for (const c of CLOUDS) {
+    const nx = (c.baseNx + gameTime * c.speed) % 1.0;
+    const cx = nx * W, cy = c.ny * sh;
+    const s  = c.scale * W * 0.048;
+    // 5 overlapping ellipses for puffy shape — offsets seeded per cloud
+    const puffs = [
+      [0,                                        0,          s,       s * 0.52],
+      [(srand(c.seed, 94) - 0.5) * s * 1.1, -s * 0.30,  s * 0.72, s * 0.44],
+      [(srand(c.seed, 95) - 0.5) * s * 1.4, -s * 0.18,  s * 0.66, s * 0.40],
+      [ s * 0.70,                             -s * 0.12,  s * 0.58, s * 0.38],
+      [-s * 0.72,                             -s * 0.10,  s * 0.60, s * 0.36],
+    ];
+    ctx.globalAlpha = alpha;
+    for (const [ox, oy, rx, ry] of puffs) {
+      ctx.beginPath();
+      ctx.ellipse(cx + ox, cy + oy, Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+// ── TRACKS ────────────────────────────────────────────────────────────────────
+// A 80×50 grid covering the ground (nx/ny 0-1). Wear accumulates as villagers
+// walk through a cell. High-wear cells become visible dirt tracks; mature
+// high-wear cells slowly pave themselves into stone roads.
+const TRACK_W         = 80;
+const TRACK_H         = 50;
+const TRACK_MAX       = 80;    // wear cap
+const TRACK_VIS       = 0.5;   // min wear for a dirt track to appear
+const TRACK_STRONG    = 20;    // wear for full dirt opacity / paving eligibility
+const TRACK_PAVE_RATE = 1 / 480000; // pave 0→1 over 8 real minutes once eligible
+
+let trackWear = new Float32Array(TRACK_W * TRACK_H);
+let trackPave = new Float32Array(TRACK_W * TRACK_H);  // 0→1
+
+// Tiny offscreen canvas: each pixel = one grid cell.
+// Drawn scaled-up with bilinear interpolation for a smooth, natural look.
+const trackCanvas = document.createElement('canvas');
+trackCanvas.width  = TRACK_W;
+trackCanvas.height = TRACK_H;
+const trackCtx = trackCanvas.getContext('2d');
+
+function trackIdx(nx, ny) {
+  const tx = Math.floor(nx * TRACK_W);
+  const ty = Math.floor(ny * TRACK_H);
+  return (tx < 0 || tx >= TRACK_W || ty < 0 || ty >= TRACK_H) ? -1 : ty * TRACK_W + tx;
+}
+
+// Weighted-random selection from worn cells — spreads movement across all
+// existing paths rather than funnelling everyone to the single busiest spot.
+function trackBiasTarget() {
+  let totalW = 0;
+  const pool = [];
+  for (let i = 0; i < 20; i++) {
+    const tx = Math.floor(Math.random() * TRACK_W);
+    const ty = Math.floor(Math.random() * TRACK_H);
+    const w  = trackWear[ty * TRACK_W + tx];
+    if (w >= TRACK_VIS) { pool.push({ tx, ty, w }); totalW += w; }
+  }
+  if (totalW === 0) return null;
+  let r = Math.random() * totalW;
+  for (const c of pool) {
+    r -= c.w;
+    if (r <= 0) return { nx: (c.tx + 0.5) / TRACK_W, ny: (c.ty + 0.5) / TRACK_H };
+  }
+  return null;
+}
+
+function updateTracks(dt) {
+  // Accumulate wear under every active (non-sleeping, non-dead) villager.
+  for (const v of villagers) {
+    if (v.state === 'sleep' || v.state === 'dead' || v.state === 'buried' ||
+        v.state === 'being_carried' || v.state === 'at_grave') continue;
+    const idx = trackIdx(v.nx, v.ny);
+    if (idx >= 0) trackWear[idx] = Math.min(TRACK_MAX, trackWear[idx] + dt * 0.001);
+  }
+  // Pave eligible cells once the village is established.
+  const mature = church && church.completion >= 1 &&
+    houses.filter(h => h.completion >= 1).length >= 4;
+  if (!mature) return;
+  for (let i = 0; i < trackWear.length; i++) {
+    if (trackWear[i] >= TRACK_STRONG && trackPave[i] < 1)
+      trackPave[i] = Math.min(1, trackPave[i] + dt * TRACK_PAVE_RATE);
+  }
+}
+
+function drawTracks(light) {
+  // Write wear/pave into the tiny canvas (1 px per cell).
+  // Drawn scaled-up with smoothing → bilinear interpolation gives soft edges.
+  const img  = trackCtx.createImageData(TRACK_W, TRACK_H);
+  const data = img.data;
+  for (let i = 0; i < trackWear.length; i++) {
+    const wear = trackWear[i];
+    if (wear < TRACK_VIS) continue;
+    const t    = Math.min(1, (wear - TRACK_VIS) / (TRACK_STRONG - TRACK_VIS));
+    const pave = trackPave[i];
+    const b    = i * 4;
+    if (pave > 0.01) {
+      // Warm limestone / cobblestone: #c0b48a
+      data[b]   = 192; data[b+1] = 180; data[b+2] = 138;
+      data[b+3] = Math.round(Math.min(1, t * 0.6 + pave * 0.4) * 210);
+    } else {
+      // Beaten earth: #9a7040
+      data[b]   = 154; data[b+1] = 112; data[b+2] = 64;
+      data[b+3] = Math.round(t * 70);
+    }
+  }
+  trackCtx.putImageData(img, 0, 0);
+
+  // Scale up to fill the ground area; smoothing gives natural blurred edges.
+  const groundY = worldY(0);
+  ctx.save();
+  ctx.globalAlpha      = Math.min(1, light + 0.15);  // dim at night, full in daylight
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(trackCanvas, 0, groundY, W, H - groundY);
+  ctx.restore();
+}
+
+// ── DRAW BACKGROUND ──────────────────────────────────────────────────────────
+function drawBackground() {
+  const t = tod(), light = ambientLight(t);
+  const [skyTop, skyBot] = skyColors(t);
+  const gndCol  = groundColor(t);
+  const horizon = skyH();
+
+  // Sky
+  const sg = ctx.createLinearGradient(0, 0, 0, horizon);
+  sg.addColorStop(0, skyTop); sg.addColorStop(1, skyBot);
+  ctx.fillStyle = sg; ctx.fillRect(0, 0, W, horizon);
+
+  drawStars(light);
+  drawSunMoon(t);
+  drawClouds(light);
+
+  // Ground: slightly dimmed at far edge (top), full colour at bottom
+  const gndFar = dimHex(gndCol, 0.82);
+  const gg = ctx.createLinearGradient(0, horizon, 0, H);
+  gg.addColorStop(0, gndFar);
+  gg.addColorStop(1, gndCol);
+  ctx.fillStyle = gg; ctx.fillRect(0, horizon, W, H-horizon);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.13)'; ctx.fillRect(0, horizon, W, 4);
+
+  drawTrees(light);
+  drawGrass(light);
+  drawTracks(light);
+}
+
+// ── HOUSE ─────────────────────────────────────────────────────────────────────
+let nextId = 1;
+
+class House {
+  constructor(nx, ny) {
+    this.id = nextId++; this.nx = nx; this.ny = ny;
+    this.completion = 0; this.buildMs = 0; this.ageMs = 0;
+    // Extensions: each teen who ages to adult in a full house triggers one.
+    // Type ('up' = extra floor, 'out' = widen) is seeded per slot so it's stable.
+    this.extensions  = 0;     // completed extensions (0–3)
+    this.extProgress = 0;     // 0→1 build progress of current extension
+    this.extPending  = false; // is an extension actively being built?
+    this.animalsGiven = false; // farm animals spawned for this house?
+    this.burning     = false;
+    this.burnProgress = 0;
+  }
+  get sy() { return worldY(this.ny); }
+
+  // Stable extension type for slot n, seeded by house id.
+  _extType(n) { return srand(this.id, 60 + n) > 0.5 ? 'up' : 'out'; }
+
+  // Current hard capacity (completed extensions only; pending slot reserved by extPending).
+  get capacity() { return 2 + this.extensions; }
+
+  // Integer floor count for window/band loops.
+  get floors() {
+    let f = 1;
+    for (let i = 0; i < this.extensions; i++) if (this._extType(i) === 'up') f++;
+    // In-progress 'up' extension shows the new floor once it's half done.
+    if (this.extPending && this._extType(this.extensions) === 'up' && this.extProgress >= 0.5) f++;
+    return f;
+  }
+
+  // Fractional width multiplier (grows smoothly while an 'out' extension is built).
+  get widthScale() {
+    let ws = 1.0;
+    for (let i = 0; i < this.extensions; i++) if (this._extType(i) === 'out') ws += 0.30;
+    if (this.extPending && this._extType(this.extensions) === 'out') ws += 0.30 * this.extProgress;
+    return ws;
+  }
+
+  // Fractional floor count for computing building height (smooth growth).
+  _buildHeight() {
+    let h = 1;
+    for (let i = 0; i < this.extensions; i++) if (this._extType(i) === 'up') h++;
+    if (this.extPending && this._extType(this.extensions) === 'up') h += this.extProgress;
+    return h;
+  }
+
+  update(dt) {
+    if (this.burning) { this.burnProgress = Math.min(1, this.burnProgress + dt / 45000); return; }
+    if (this.completion >= 1) {
+      this.ageMs += dt;
+      // Extension progress — any resident in 'build' state near the house contributes.
+      if (this.extPending) {
+        const workers = villagers.filter(v =>
+          v.homeId === this.id && v.state === 'build' &&
+          Math.hypot(v.nx - this.nx, v.ny - this.ny) < 0.05);
+        if (workers.length > 0) {
+          this.extProgress = Math.min(1, this.extProgress + dt * workers.length / 40000);
+          if (this.extProgress >= 1) {
+            this.extensions++;
+            this.extProgress = 0;
+            this.extPending  = false;
+          }
+        }
+      }
+      return;
+    }
+    const workers = villagers.filter(v =>
+      v.homeId === this.id && v.state === 'build' &&
+      Math.hypot(v.nx - this.nx, v.ny - this.ny) < 0.05);
+    if (workers.length > 0) {
+      this.buildMs += dt * workers.length;
+      this.completion = Math.min(1, this.buildMs / 55000);
+    }
+  }
+
+  draw() {
+    const t = tod(), light = ambientLight(t);
+    const s = H/600, c = this.completion, x = this.nx*W, y = this.sy;
+    if (c <= 0) return;
+    const ws  = this.widthScale;
+    const w   = 58*s * ws;
+    const bh  = (36 + this._buildHeight() * 14) * s;  // smooth height during extension
+    const rh  = (16 + ws * 12) * s;
+    const flH = bh / this.floors;               // height of one storey (integer floors)
+    const wall  = dimHex(C.WALL,    light);
+    const wallD = dimHex(C.WALL_D,  light);
+    const roof  = dimHex(C.ROOF,    light);
+    const door  = dimHex(C.DOOR,    light);
+    const win   = light < 0.35 ? C.WIN_LIT : dimHex(C.WIN_DAY, light);
+    const chim  = dimHex(C.CHIMNEY, light);
+
+    // Walls
+    noisyBox(x-w/2, y-bh*Math.min(c*6,1), w, bh*Math.min(c*6,1), this.id*7,   2.5*s, wallD);
+    if (c > 0.16) {
+      const wh = bh*Math.min((c-0.16)*6,1);
+      noisyBox(x-w/2, y-wh, w, wh, this.id*7+1, 2*s, wall);
+    }
+    // Storey divider bands
+    if (c > 0.45 && this.floors > 1) {
+      for (let fl = 1; fl < this.floors; fl++)
+        box(x-w/2+2*s, y - fl*flH - 2*s, w-4*s, 3*s, wallD);
+    }
+    // Roof
+    if (c > 0.35) {
+      const ra = Math.min((c-0.35)*5, 1);
+      ctx.globalAlpha = ra;
+      noisyPoly([[x,y-bh-rh*ra],[x-w/2-5*s,y-bh],[x+w/2+5*s,y-bh]], this.id*7+2, 2*s, roof);
+      ctx.globalAlpha = 1;
+    }
+    // Door
+    if (c > 0.55) box(x-5*s, y-17*s, 10*s, 17*s, door);
+    // Windows — one row per storey (fl=0 is topmost)
+    if (c > 0.70) {
+      for (let fl = 0; fl < this.floors; fl++) {
+        const isGround = fl === this.floors - 1;
+        // Ground floor: skip windows if too narrow to fit beside the door
+        if (isGround && w < 46*s) continue;
+        // Narrow multi-storey: also skip ground-floor side windows (door fills the space)
+        if (isGround && this.floors > 1 && ws < 1.08) continue;
+        const wy = y - bh + 10*s + fl * flH;
+        box(x-w/2+7*s, wy, 9*s, 9*s, win);
+        box(x+w/2-16*s, wy, 9*s, 9*s, win);
+        if (ws > 1.15) box(x-4.5*s, wy, 9*s, 9*s, win);  // centre window on wide houses
+      }
+    }
+    // Chimney
+    if (c > 0.88) {
+      const cx = x + w * 0.22;
+      noisyBox(cx, y-bh-18*s, 8*s, 18*s, this.id*7+3, 1.5*s, chim);
+      if (light < 0.45) {
+        ctx.globalAlpha = 0.25;
+        for (let i = 0; i < 3; i++) disk(cx+4*s, y-bh-23*s-8*s*i, (3+i*2)*s, '#909090');
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // ── Mature flora (ageMs > 5 min = 300 000 ms) ─────────────────────────────
+    if (c < 1 || this.ageMs < 300000) return;
+    const fa = Math.min(1, (this.ageMs - 300000) / 60000);
+    ctx.globalAlpha = fa;
+
+    const hasRoses = srand(this.id, 52) > 0.38;
+    const hasBoxes = srand(this.id, 53) > 0.42;
+
+    if (hasRoses) {
+      const vine = dimHex('#2a5010', light);
+      const rose = dimHex(srand(this.id, 54) > 0.5 ? '#c02838' : '#d06080', light);
+      for (const side of [-1, 1]) {
+        const vx = x + side * 5.5*s;
+        for (let i = 0; i < 5; i++) {
+          box(vx - 0.8*s, y - 2*s - i*3.5*s, 1.6*s, 3.5*s, vine);
+          if (srand(this.id, 55 + i + (side > 0 ? 10 : 0)) > 0.45)
+            disk(vx + (srand(this.id, 56+i+(side>0?10:0))*4-2)*s, y-3*s-i*3.5*s, 2.2*s, rose);
+        }
+      }
+    }
+
+    if (hasBoxes) {
+      const boxWood = dimHex('#4a2808', light);
+      const FCOLS = ['#e8d020','#e05070','#ff3030','#f0f0e8','#e070c0','#ff8020'];
+      for (let fl = 0; fl < this.floors; fl++) {
+        const isGround = fl === this.floors - 1;
+        if (isGround && w < 46*s) continue;
+        if (isGround && this.floors > 1 && ws < 1.08) continue;
+        const wy = y - bh + 10*s + fl * flH;
+        const slots = [[x-w/2+6*s, 0], [x+w/2-17*s, 1], ...(ws > 1.15 ? [[x-5.5*s, 2]] : [])];
+        for (const [wx, si] of slots) {
+          box(wx, wy + 9*s, 11*s, 3*s, boxWood);
+          for (let i = 0; i < 4; i++) {
+            const fc = dimHex(FCOLS[Math.min(FCOLS.length-1, Math.floor(srand(this.id, 57+fl*30+si*10+i) * FCOLS.length))], light);
+            disk(wx + 1.5*s + i*2.5*s, wy + 9*s, 2*s, fc);
+          }
+        }
+      }
+    }
+
+    ctx.globalAlpha = 1;
+
+    // Fire overlay when burning
+    if (this.burning && this.burnProgress < 1) {
+      const fp = this.burnProgress;
+      const s = H / 600;
+      const cx = this.nx * W, baseY = worldY(this.ny);
+      const hw = 31 * this.widthScale * s;
+      const flameH = (60 + fp * 80) * s;
+      const now = Date.now();
+      ctx.globalAlpha = 0.82;
+      // 5 flame tongues
+      for (let i = 0; i < 5; i++) {
+        const fx = cx + (i / 4 - 0.5) * hw * 1.6;
+        const wob = Math.sin(now * 0.006 + i * 1.3) * 6 * s;
+        const fh  = flameH * (0.6 + 0.4 * Math.sin(now * 0.004 + i * 2.1));
+        poly([fx - 8 * s, baseY, fx + 8 * s, baseY, fx + wob * 0.5, baseY - fh * 0.6, fx + wob, baseY - fh], '#ff6600');
+        ctx.globalAlpha = 0.45;
+        poly([fx - 5 * s, baseY, fx + 5 * s, baseY, fx + wob * 0.3, baseY - fh * 0.4, fx + wob * 0.5, baseY - fh * 0.75], '#ffdd00');
+        ctx.globalAlpha = 0.82;
+      }
+      // Smoke puffs above
+      ctx.globalAlpha = 0.35;
+      for (let i = 0; i < 3; i++) {
+        const sr = (12 + i * 8) * s;
+        const sx = cx + Math.sin(now * 0.002 + i * 1.7) * 10 * s;
+        const sy = baseY - flameH - i * 18 * s;
+        disk(sx, sy, sr, '#332820');
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// ── CHURCH ───────────────────────────────────────────────────────────────────
+class Church {
+  constructor(nx, ny) {
+    this.id = nextId++; this.nx = nx; this.ny = ny;
+    this.completion = 0; this.buildMs = 0;
+    this.ageMs = 0; this.lastBellDay = -1;
+  }
+  get sy() { return worldY(this.ny); }
+  get hasWindows()   { return this.ageMs > 30000;  }
+  get hasBell()      { return this.ageMs > 120000; }
+  get hasGargoyles() { return this.ageMs > 300000; }
+
+  update(dt) {
+    if (this.completion < 1) {
+      const workers = villagers.filter(v => v.state === 'build_church');
+      this.buildMs += dt * Math.max(workers.length, 0.2);
+      this.completion = Math.min(1, this.buildMs / 100000);
+      return;
+    }
+    this.ageMs += dt;
+    // Ring bell at start of Sunday service
+    const t = tod();
+    const isSundayMorning = (dayNum() % 7 === 0) && t > 0.25 && t < 0.27;
+    if (this.hasBell && isSundayMorning && this.lastBellDay !== dayNum()) {
+      this.lastBellDay = dayNum();
+      playChurchBell();
+    }
+  }
+
+  draw() {
+    const t = tod(), light = ambientLight(t);
+    const s = H/600, c = this.completion, x = this.nx*W, y = this.sy;
+    if (c < 0.04) return;
+    const w = 78*s, bh = 68*s, rh = 38*s, tw = 24*s, tth = 86*s;
+    const wall  = dimHex(C.CH_WALL, light);
+    const roofC = dimHex(C.CH_ROOF, light);
+    const door  = dimHex(C.DOOR,    light);
+    const cross = dimHex(C.CROSS,   light);
+
+    noisyBox(x-w/2, y-bh*Math.min(c/0.45,1), w, bh*Math.min(c/0.45,1), 999, 3*s, wall);
+    if (c > 0.45) {
+      const ra = Math.min((c-0.45)*4,1);
+      ctx.globalAlpha = ra;
+      noisyPoly([[x,y-bh-rh*ra],[x-w/2-6*s,y-bh],[x+w/2+6*s,y-bh]], 1000, 2.5*s, roofC);
+      ctx.globalAlpha = 1;
+    }
+    if (c > 0.55) {
+      const ta = Math.min((c-0.55)*5,1), tcx = x-w/2-tw;
+      noisyBox(tcx, y-tth*ta, tw, tth*ta, 1001, 2*s, wall);
+      if (c > 0.80) {
+        const sa = Math.min((c-0.80)*5,1), spH = 36*s*sa, cx2 = tcx+tw/2;
+        noisyPoly([[cx2,y-tth-spH],[cx2-tw/2-2*s,y-tth],[cx2+tw/2+2*s,y-tth]], 1002, 2*s, roofC);
+      }
+    }
+    if (c > 0.92) {
+      const ca = Math.min((c-0.92)*12,1);
+      ctx.globalAlpha = ca;
+      const cx2    = x-w/2-tw/2;
+      const spTip  = y - tth - 36*s*Math.min((c-0.80)*5,1);
+      const cy2    = spTip - 6*s;
+      ctx.strokeStyle = cross; ctx.lineWidth = 3*s;
+      ctx.beginPath(); ctx.moveTo(cx2, cy2-14*s); ctx.lineTo(cx2, cy2+4*s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx2-8*s, cy2-7*s); ctx.lineTo(cx2+8*s, cy2-7*s); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    if (c > 0.72) {
+      const dw = 12*s, dh = 22*s;
+      ctx.fillStyle = door;
+      ctx.beginPath();
+      ctx.rect(x-dw/2, y-dh, dw, dh-dw/2);
+      ctx.arc(x, y-dh+dw/2, dw/2, Math.PI, 0);
+      ctx.fill();
+    }
+
+    // ── Post-completion features ──────────────────────────────────────────────
+    if (c < 1) return;
+    const winCol  = light < 0.35 ? dimHex(C.WIN_LIT, light) : dimHex(C.WIN_DAY, light);
+    const stoneCol = dimHex(C.CH_WALL, light);
+
+    // Windows (unlocked at ageMs > 30 000)
+    if (this.hasWindows) {
+      const fa = Math.min(1, (this.ageMs - 30000) / 20000);
+      ctx.globalAlpha = fa;
+      // Rose window on nave front (above door)
+      const rwx = x, rwy = y - bh + 20*s, rwr = 10*s;
+      disk(rwx, rwy, rwr + 2*s, stoneCol);
+      disk(rwx, rwy, rwr, winCol);
+      // Rose spokes
+      ctx.strokeStyle = stoneCol; ctx.lineWidth = 1.5*s;
+      for (let a = 0; a < Math.PI * 2; a += Math.PI / 4) {
+        ctx.beginPath();
+        ctx.moveTo(rwx + Math.cos(a)*3*s, rwy + Math.sin(a)*3*s);
+        ctx.lineTo(rwx + Math.cos(a)*rwr,  rwy + Math.sin(a)*rwr);
+        ctx.stroke();
+      }
+      disk(rwx, rwy, 3*s, stoneCol);
+      // Lancet side windows on nave
+      for (const side of [-1, 1]) {
+        const wx = x + side * (w/2 - 9*s), wy = y - bh + 38*s;
+        box(wx - 5*s, wy - 16*s, 10*s, 16*s, stoneCol);
+        ctx.beginPath();
+        ctx.arc(wx, wy - 16*s, 5*s, Math.PI, 0);
+        ctx.rect(wx - 5*s, wy - 16*s, 10*s, 16*s);
+        ctx.fillStyle = winCol; ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Bell in tower (unlocked at ageMs > 120 000)
+    if (this.hasBell) {
+      const fa = Math.min(1, (this.ageMs - 120000) / 20000);
+      ctx.globalAlpha = fa;
+      const tcx = x - w/2 - tw/2;
+      const bely = y - tth + 28*s; // bell opening mid-height
+      // Two arched openings (front and side illusion)
+      for (const side of [-1, 1]) {
+        const ox = tcx + side * 4*s;
+        ctx.beginPath();
+        ctx.arc(ox, bely - 8*s, 5*s, Math.PI, 0);
+        ctx.rect(ox - 5*s, bely - 8*s, 10*s, 8*s);
+        ctx.fillStyle = dimHex('#1a1008', light); ctx.fill();
+      }
+      // Bell silhouette
+      ctx.fillStyle = dimHex('#604820', light);
+      ctx.beginPath();
+      ctx.arc(tcx, bely - 5*s, 4.5*s, Math.PI, 0);
+      ctx.closePath(); ctx.fill();
+      box(tcx - 1*s, bely - 5*s, 2*s, 4*s, dimHex('#302010', light)); // clapper
+      ctx.globalAlpha = 1;
+    }
+
+    // Gargoyles (unlocked at ageMs > 300 000)
+    if (this.hasGargoyles) {
+      const fa = Math.min(1, (this.ageMs - 300000) / 20000);
+      ctx.globalAlpha = fa;
+      const gy = y - bh; // base of roof / top of walls
+      const gstone = dimHex('#a89878', light);
+      for (const side of [-1, 1]) {
+        // Tower is on the left (side=-1); place that gargoyle outside the tower's outer face instead
+        const gx = side === 1 ? x + (w/2 + 6*s) : x - w/2 - tw - 4*s;
+        // Body crouching on the cornice
+        noisyPoly([
+          [gx,          gy - 2*s],
+          [gx + side*12*s, gy - 4*s],
+          [gx + side*16*s, gy - 2*s],
+          [gx + side*14*s, gy + 4*s],
+          [gx,          gy + 3*s],
+        ], 5001 + side, 1.2*s, gstone);
+        // Head
+        disk(gx + side*17*s, gy - 4*s, 4*s, gstone);
+        // Snout
+        poly([
+          [gx + side*20*s, gy - 4*s],
+          [gx + side*20*s, gy - 2*s],
+          [gx + side*26*s, gy - 3*s],
+        ], gstone);
+        // Eye socket
+        disk(gx + side*18.5*s, gy - 5.5*s, 1.2*s, dimHex('#201808', light));
+        // Wing stub
+        noisyPoly([
+          [gx + side*2*s,  gy - 6*s],
+          [gx + side*10*s, gy - 14*s],
+          [gx + side*14*s, gy - 8*s],
+          [gx + side*8*s,  gy - 2*s],
+        ], 5003 + side, 1.5*s, dimHex('#907858', light));
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// ── BUILDING AVOIDANCE ───────────────────────────────────────────────────────
+// The door / front face of each building is at its registered ny coordinate.
+// The building occupies space BEHIND the door (smaller ny = farther from viewer)
+// plus a tiny doorstep buffer in front, so wanderers stop just outside the door.
+// Resolution is always in ny only — buildings are "shallow" so the detour is small.
+const BLDG_BACK  = 0.044; // depth of building behind its door face (in ny)
+const BLDG_FRONT = 0.006; // small doorstep buffer in front of the door face (in ny)
+// Convenience: the ny coordinate of a building's doorstep (just in front of the door)
+function bldgDoorNy(ny) { return ny + BLDG_FRONT; }
+
+// prevNy = the villager's ny BEFORE this frame's movement, used to determine
+// which face of each obstacle zone they entered through so they stop cleanly
+// on that face rather than oscillating back and forth across the boundary.
+function avoidBldgs(nx, ny, prevNy) {
+  const s = H / 600;
+  let adjNy = ny;
+  // Stop at whichever face the villager entered through.
+  // If they were already inside (e.g. first frame after load), push to nearest face.
+  function checkRect(cx, halfW, y1, y2) {
+    if (nx <= cx - halfW || nx >= cx + halfW) return; // clear in nx
+    if (adjNy <= y1 || adjNy >= y2) return;           // already outside
+    if      (prevNy >= y2) adjNy = y2;   // entered from front — stop at front face
+    else if (prevNy <= y1) adjNy = y1;   // entered from back  — stop at back face
+    else adjNy = (adjNy - y1 < y2 - adjNy) ? y1 : y2; // was inside — push to nearest
+  }
+  function checkBldg(cx, halfW, cy) {
+    checkRect(cx, halfW, cy - BLDG_BACK, cy + BLDG_FRONT);
+  }
+  for (const h of houses) {
+    if (h.completion < 0.25) continue;
+    checkBldg(h.nx, 31 * h.widthScale * s / W, h.ny);
+  }
+  if (church    && church.completion    > 0.25) checkBldg(church.nx,    50 * s / W, church.ny);
+  if (mausoleum && mausoleum.completion > 0.25) checkBldg(mausoleum.nx, 52 * s / W, mausoleum.ny);
+  for (const g of kitchenGardens) {
+    if (!g.built) continue;
+    checkRect(g.nx, 24 * s / W, g.ny - 0.068, g.ny + 0.008);
+  }
+  if (pond) checkRect(pond.nx, pond.rx, pond.ny - pond.ry, pond.ny + pond.ry);
+  return Math.max(0.02, Math.min(0.98, adjNy));
+}
+
+// Returns an intermediate waypoint that routes around the first obstacle blocking
+// the straight-line path from (nx,ny) to (tnx,tny), or null if the path is clear.
+// The waypoint is placed past the obstacle's FAR face (the one the villager is
+// heading toward), so the onward path from the waypoint to the final target is
+// also clear — one hop per obstacle is always sufficient.
+function pathDetour(nx, ny, tnx, tny) {
+  const s = H / 600;
+  const MARGIN = 0.018;
+  const pathNyMin = Math.min(ny, tny), pathNyMax = Math.max(ny, tny);
+
+  const rects = [];
+  for (const h of houses) {
+    if (h.completion < 0.25) continue;
+    rects.push({ cx: h.nx, halfW: 31 * h.widthScale * s / W,
+                 y1: h.ny - BLDG_BACK, y2: h.ny + BLDG_FRONT });
+  }
+  if (church    && church.completion    > 0.25)
+    rects.push({ cx: church.nx,    halfW: 50*s/W,
+                 y1: church.ny    - BLDG_BACK, y2: church.ny    + BLDG_FRONT });
+  if (mausoleum && mausoleum.completion > 0.25)
+    rects.push({ cx: mausoleum.nx, halfW: 52*s/W,
+                 y1: mausoleum.ny - BLDG_BACK, y2: mausoleum.ny + BLDG_FRONT });
+  if (pond)
+    rects.push({ cx: pond.nx, halfW: pond.rx, y1: pond.ny - pond.ry, y2: pond.ny + pond.ry });
+
+  for (const r of rects) {
+    // Intentional approach: final target is within this obstacle's footprint — skip.
+    if (tnx >= r.cx - r.halfW && tnx <= r.cx + r.halfW &&
+        tny >= r.y1 - 0.01   && tny <= r.y2 + 0.01) continue;
+    // Already inside (avoidBldgs handles that) — skip.
+    if (nx >= r.cx - r.halfW && nx <= r.cx + r.halfW &&
+        ny >= r.y1            && ny <= r.y2) continue;
+    // Obstacle's ny range must straddle some portion of the path's ny span.
+    if (r.y1 >= pathNyMax || r.y2 <= pathNyMin) continue;
+    // Find the path's nx at the obstacle's depth midpoint.
+    const ymid = (Math.max(r.y1, pathNyMin) + Math.min(r.y2, pathNyMax)) * 0.5;
+    const t    = tny !== ny ? (ymid - ny) / (tny - ny) : 0.5;
+    const xAt  = nx + t * (tnx - nx);
+    if (xAt <= r.cx - r.halfW || xAt >= r.cx + r.halfW) continue; // path misses in x
+
+    // Path is blocked. Waypoint placed past the far face so the onward leg is clear.
+    const wpNy    = ny > r.y2 ? r.y1 - MARGIN : r.y2 + MARGIN;
+    const leftNx  = r.cx - r.halfW - MARGIN;
+    const rightNx = r.cx + r.halfW + MARGIN;
+    const dLeft   = Math.hypot(leftNx  - nx, wpNy - ny) + Math.hypot(tnx - leftNx,  tny - wpNy);
+    const dRight  = Math.hypot(rightNx - nx, wpNy - ny) + Math.hypot(tnx - rightNx, tny - wpNy);
+    return { nx: dLeft <= dRight ? leftNx : rightNx, ny: wpNy };
+  }
+  return null;
+}
+
+// ── VILLAGER ─────────────────────────────────────────────────────────────────
+const AGE_DURATION = { child: 200000, teen: 260000, adult: 600000 };
+
+class Villager {
+  constructor(d = {}) {
+    this.id       = d.id       !== undefined ? d.id       : nextId++;
+    this.nx       = d.nx       !== undefined ? d.nx       : 0.5;
+    this.ny       = d.ny       !== undefined ? d.ny       : 0.5;
+    this.gender   = d.gender   || (Math.random() < 0.5 ? 'm' : 'f');
+    this.age      = d.age      || 'adult';
+    this.homeId   = d.homeId   !== undefined ? d.homeId   : null;
+    this.state    = d.state    || 'wander';
+    this.stateMs  = d.stateMs  || 0;
+    this.ageMs    = d.ageMs    || 0;
+    this.childMs  = d.childMs  !== undefined ? d.childMs  : (60000 + Math.random()*90000);
+    this.fertility = d.fertility !== undefined ? d.fertility
+      : Math.max(1, Math.min(7, Math.round(3 + (Math.random()+Math.random()+Math.random()+Math.random()-2)*1.5)));
+    this.tnx      = d.tnx      !== undefined ? d.tnx      : this.nx;
+    this.tny      = d.tny      !== undefined ? d.tny      : this.ny;
+    this.isPriest = d.isPriest || false;
+    this.hairColor  = d.hairColor  || (Math.random() < 0.6 ? C.HAIR_BR : C.HAIR_BL);
+    this.skinColor  = d.skinColor  || null;  // null = default C.SKIN; set by wizard
+    this.shirtColor = d.shirtColor || null;  // null = default; set by wizard
+    this.partnerId     = d.partnerId !== undefined ? d.partnerId : null; // permanent bond
+    this.handPartnerId = null;  // id of hand-holding partner, or null
+    this.holdHandMs    = 0;     // remaining ms of hand-hold
+    this.carryBodyId   = null;  // id of body being carried, or null
+    this.moving        = false; // true only when actually displacing this frame
+  }
+
+  get sy() { return worldY(this.ny); }
+
+  // Half the building scale (H/1200 vs H/600)
+  get scale() {
+    const base = H / 1200;
+    if (this.age === 'child') return base * 0.5;
+    if (this.age === 'teen')  return base * 0.75;
+    return base;
+  }
+
+  _shirtColor() {
+    if (this.shirtColor) return this.shirtColor;
+    if (this.isPriest)        return C.ROBE;
+    if (this.age === 'child') return C.SHIRT_K;
+    return this.gender === 'm' ? C.SHIRT_M : C.SHIRT_F;
+  }
+
+  update(dt) {
+    this.moving = false; // reset each frame; _moveTo sets true when displacing
+    const t       = tod();
+    const light   = ambientLight(t);
+    const isNight = light < 0.25;
+    const isSunday = (dayNum() % 7 === 0) && (t > 0.25 && t < 0.42);
+
+    this.stateMs -= dt;
+    if (this.holdHandMs > 0) {
+      this.holdHandMs -= dt;
+      if (this.holdHandMs <= 0) this._releaseHand();
+    }
+
+    // Age progression (child → teen → adult → old)
+    if (this.age in AGE_DURATION) {
+      this.ageMs += dt;
+      if (this.ageMs >= AGE_DURATION[this.age]) {
+        this.ageMs = 0;
+        if      (this.age === 'child') { this.age = 'teen'; }
+        else if (this.age === 'teen')  {
+          this.age = 'adult'; playGrow();
+          // Grown-up child: extend the house or leave if it's full.
+          if (this.homeId !== null) {
+            const home = houses.find(h => h.id === this.homeId);
+            if (home && home.completion >= 1) {
+              const otherAdults = villagers.filter(v =>
+                v.homeId === home.id && v.id !== this.id &&
+                (v.age === 'adult' || v.age === 'old')).length;
+              if (otherAdults >= home.capacity) {
+                if (home.extensions < 3 && !home.extPending) {
+                  // Trigger extension — new adult goes to build it.
+                  home.extPending  = true;
+                  home.extProgress = 0;
+                  this.state   = 'build';
+                  this.stateMs = 15000 + Math.random() * 15000;
+                  this.tnx = home.nx; this.tny = home.ny;
+                } else {
+                  // House is at max capacity or extension already in progress — re-home.
+                  this.homeId = null;
+                  assignHome(this);
+                }
+              }
+            }
+          }
+        }
+        else if (this.age === 'adult') { this.age = 'old'; }
+      }
+    }
+    // Old-age death — threshold varies per villager via stable sin hash (4–9 min as old)
+    if (this.age === 'old' && this.state !== 'dead' &&
+        this.state !== 'being_carried' && this.state !== 'at_grave') {
+      this.ageMs += dt;
+      if (this.ageMs >= 240000 + (Math.sin(this.id * 2.1) + 1) * 150000) this._die();
+    }
+
+    // Child production — any cohabiting adult pair (any gender combo); lower-id partner owns the timer
+    if (this.age === 'adult' && this.homeId !== null && !this.isPriest && this.fertility > 0) {
+      const mate = villagers.find(v =>
+        v.homeId === this.homeId && v.id > this.id && v.age === 'adult' && !v.isPriest && v.fertility > 0);
+      if (mate) {
+        this.childMs -= dt;
+        if (this.childMs <= 0) {
+          spawnChild(this);
+          this.fertility--;
+          mate.fertility--;
+          this.childMs = 60000 + Math.random() * 120000;
+        }
+      }
+    }
+
+    // Sunday church attendance
+    if (isSunday && church && church.completion > 0.6
+        && this.state !== 'church' && this.state !== 'sleep' && this.state !== 'flee'
+        && this.state !== 'going_home' && this.state !== 'funeral' && this.state !== 'fetch_body'
+        && this.state !== 'carry_body' && this.state !== 'dead'
+        && this.state !== 'being_carried' && this.state !== 'at_grave' && this.state !== 'mob') {
+      this.state = 'church'; this.stateMs = 9999999;
+      this.tnx = church.nx;  this.tny = church.ny;
+    }
+
+    // Wolf proximity — flee if wolf is nearby
+    if (wolf.active && this.state !== 'sleep' && this.state !== 'flee'
+        && this.state !== 'dead' && this.state !== 'being_carried' && this.state !== 'at_grave') {
+      const wdx = this.nx - wolf.nx, wdy = this.ny - wolf.ny;
+      if (Math.hypot(wdx, wdy) < 0.16) {
+        const ang = Math.atan2(wdy, wdx);
+        this.tnx = Math.max(0.02, Math.min(0.98, this.nx + Math.cos(ang) * 0.40));
+        this.tny = Math.max(0.02, Math.min(0.98, this.ny + Math.sin(ang) * 0.40));
+        this.state = 'flee'; this.stateMs = 2000 + Math.random() * 2000;
+      }
+    }
+
+    // Bear proximity — flee if bear is nearby (shorter range: ~1/3 of wolf's)
+    if (bear.active && this.state !== 'sleep' && this.state !== 'flee'
+        && this.state !== 'dead' && this.state !== 'being_carried' && this.state !== 'at_grave') {
+      const bdx = this.nx - bear.nx, bdy = this.ny - bear.ny;
+      if (Math.hypot(bdx, bdy) < 0.11) {
+        const ang = Math.atan2(bdy, bdx);
+        this.tnx = Math.max(0.02, Math.min(0.98, this.nx + Math.cos(ang) * 0.30));
+        this.tny = Math.max(0.02, Math.min(0.98, this.ny + Math.sin(ang) * 0.30));
+        this.state = 'flee'; this.stateMs = 2000 + Math.random() * 2000;
+      }
+    }
+
+    // Ghost proximity — flee if ghost is nearby
+    if (ghost.active && this.state !== 'sleep' && this.state !== 'flee'
+        && this.state !== 'going_home'
+        && this.state !== 'dead' && this.state !== 'being_carried' && this.state !== 'at_grave') {
+      const ghdx = this.nx - ghost.nx, ghdy = this.ny - ghost.ny;
+      if (Math.hypot(ghdx, ghdy) < 0.16) {
+        const ang = Math.atan2(ghdy, ghdx);
+        this.tnx = Math.max(0.02, Math.min(0.98, this.nx + Math.cos(ang) * 0.40));
+        this.tny = Math.max(0.02, Math.min(0.98, this.ny + Math.sin(ang) * 0.40));
+        this.state = 'flee'; this.stateMs = 2000 + Math.random() * 2000;
+      }
+    }
+
+    // Validate hand-hold; break if partner gone or state conflicts
+    if (this.handPartnerId !== null) {
+      const _p = villagers.find(v => v.id === this.handPartnerId);
+      if (!_p || _p.handPartnerId !== this.id ||
+          this.state === 'flee' || this.state === 'build' ||
+          this.state === 'build_church' || this.state === 'build_mausoleum' ||
+          this.state === 'church' || this.state === 'going_home') {
+        this._releaseHand();
+      }
+    }
+
+    // Evening — head home proactively when it gets late (before full dark)
+    if (tod() > 0.70 && this.homeId !== null && this.state === 'wander' && this.handPartnerId === null) {
+      const _eh = houses.find(h => h.id === this.homeId && h.completion > 0.5);
+      if (_eh) { this.state = 'going_home'; this.tnx = _eh.nx; this.tny = bldgDoorNy(_eh.ny); this.stateMs = 99999; }
+    }
+
+    switch (this.state) {
+      case 'arrive':
+        this._moveTo(this.tnx, this.tny, dt, 0.00018, true);
+        if (Math.hypot(this.tnx-this.nx, this.tny-this.ny) < 0.012) {
+          this.state = 'wander'; this.stateMs = 2000 + Math.random()*4000;
+          assignHome(this);
+        }
+        break;
+
+      case 'wander': {
+        let wspeed = this.age === 'old' ? 0.000038 : 0.000055;
+        if (this.handPartnerId !== null) {
+          const _ldr = villagers.find(v => v.id === this.handPartnerId);
+          if (_ldr) {
+            if (_ldr.id < this.id) {
+              // Follower locks onto leader's current position + lateral offset
+              const side = (this.id % 2 === 0) ? 0.022 : -0.022;
+              this.tnx = Math.max(0.02, Math.min(0.98, _ldr.nx + side));
+              this.tny = _ldr.ny;
+            }
+            // both partners walk at the pace of the slower one
+            wspeed = Math.min(wspeed, _ldr.age === 'old' ? 0.000038 : 0.000055);
+          }
+        }
+        this._moveTo(this.tnx, this.tny, dt, wspeed, true);
+        if (Math.hypot(this.tnx-this.nx, this.tny-this.ny) < 0.012 || this.stateMs <= 0) {
+          if (isNight && this.homeId !== null) {
+            const _wh = houses.find(h => h.id === this.homeId && h.completion > 0.5);
+            if (_wh) { this.state = 'going_home'; this.tnx = _wh.nx; this.tny = _wh.ny; this.stateMs = 99999; }
+            else { this.state = 'sleep'; }
+          } else if (isNight && this.homeId === null) {
+            this.state = 'sleep';
+          } else { this._pickTarget(); }
+        }
+        break;
+      }
+
+      case 'build': {
+        const home = houses.find(h => h.id === this.homeId);
+        if (!home || (home.completion >= 1 && !home.extPending) || this.stateMs <= 0) { this._pickTarget(); }
+        else { this._moveTo(home.nx, home.ny, dt, 0.000045, true); }
+        break;
+      }
+
+      case 'build_church':
+        if (!church || church.completion >= 1 || this.stateMs <= 0) { this._pickTarget(); }
+        else { this._moveTo(church.nx, church.ny, dt, 0.000045, true); }
+        break;
+
+      case 'sleep':
+        if (!isNight && tod() < 0.70) {
+          // Ensure homed villagers emerge from the doorstep, not from inside the building.
+          if (this.homeId !== null) {
+            const _sh = houses.find(h => h.id === this.homeId);
+            if (_sh && _sh.completion >= 0.5) {
+              this.nx = _sh.nx; this.ny = bldgDoorNy(_sh.ny);
+            }
+          }
+          // Morning emergence — pair with permanent partner, or form one (65% chance)
+          if (this.handPartnerId === null && this.homeId !== null) {
+            let partner = this.partnerId !== null
+              ? villagers.find(v => v.id === this.partnerId && v.state === 'sleep' && v.handPartnerId === null)
+              : null;
+            if (!partner && Math.random() < 0.65) {
+              partner = villagers.find(v =>
+                v.homeId === this.homeId && v.id !== this.id &&
+                v.age === 'adult' && v.state === 'sleep' && v.handPartnerId === null && v.partnerId === null);
+              if (partner) { this.partnerId = partner.id; partner.partnerId = this.id; }
+            }
+            if (partner) {
+              this.handPartnerId = partner.id; partner.handPartnerId = this.id;
+              const dur = 25000 + Math.random() * 35000;
+              this.holdHandMs = dur; partner.holdHandMs = dur;
+            }
+          }
+          this._pickTarget();
+        }
+        break;
+
+      case 'church':
+        this._moveTo(this.tnx, this.tny, dt, 0.000080, true);
+        if (!isSunday) this._pickTarget();
+        break;
+
+      case 'flee':
+        this._moveTo(this.tnx, this.tny, dt, 0.00026);
+        if (this.stateMs <= 0 || (!wolf.active && !bear.active && !ghost.active)) this._pickTarget();
+        break;
+
+      case 'going_home': {
+        const _gh = houses.find(h => h.id === this.homeId);
+        if (!_gh || _gh.completion < 0.5) { this.state = 'sleep'; break; }
+        const _doorNy = bldgDoorNy(_gh.ny);
+        this._moveTo(_gh.nx, _doorNy, dt, this.age === 'old' ? 0.000042 : 0.000065, true);
+        if (Math.hypot(_gh.nx - this.nx, _doorNy - this.ny) < 0.02) {
+          this.nx = _gh.nx; this.ny = _doorNy; // snap to doorstep then enter
+          this.state = 'sleep';
+        }
+        break;
+      }
+
+      case 'dead':
+        break; // lie still; updateDeaths() assigns a carrier
+
+      case 'being_carried':
+        break; // position mirrored by carrier each frame
+
+      case 'at_grave':
+        if (this.stateMs <= 0) {
+          graveyard.totalDead = (graveyard.totalDead || graveyard.crosses.length) + 1;
+          graveyard.crosses.push({ nx: this.nx, ny: this.ny });
+          this.state = 'buried';
+        }
+        break;
+
+      case 'buried':
+        break; // filtered from villagers[] by updateDeaths()
+
+      case 'funeral':
+        this._moveTo(this.tnx, this.tny, dt, 0.000060, true);
+        if (this.stateMs <= 0) this._pickTarget();
+        break;
+
+      case 'fetch_body': {
+        const _b = villagers.find(v => v.id === this.carryBodyId);
+        if (!_b || _b.state !== 'dead') { this.carryBodyId = null; this._pickTarget(); break; }
+        this._moveTo(_b.nx, _b.ny, dt, 0.000060, true);
+        if (Math.hypot(_b.nx - this.nx, _b.ny - this.ny) < 0.025) {
+          _b.state = 'being_carried';
+          ensureGraveyard();
+          this.state = 'carry_body';
+          this.tnx = graveyard.nx + (Math.random()-0.5)*0.12;
+          this.tny = graveyard.ny + (Math.random()-0.5)*0.08;
+        }
+        break;
+      }
+
+      case 'carry_body': {
+        const _b = villagers.find(v => v.id === this.carryBodyId);
+        if (!_b || _b.state !== 'being_carried') { this.carryBodyId = null; this._pickTarget(); break; }
+        _b.nx = this.nx; _b.ny = this.ny;
+        this._moveTo(this.tnx, this.tny, dt, 0.000042, true); // slow — heavy load
+        if (Math.hypot(this.tnx - this.nx, this.tny - this.ny) < 0.025) depositBody(this, _b);
+        break;
+      }
+
+      case 'build_garden': {
+        const _gg = kitchenGardens.find(g => g.houseId === this.homeId && !g.built);
+        if (!_gg || this.stateMs <= 0) { this._pickTarget(); break; }
+        this._moveTo(_gg.nx, _gg.ny, dt, 0.000050);
+        _gg.buildMs += dt;
+        if (_gg.buildMs >= GARDEN_BUILD_MS) { _gg.built = true; this._pickTarget(); }
+        break;
+      }
+
+      case 'harvest': {
+        const _rg = kitchenGardens.find(g => g.houseId === this.homeId && g.hasRipeVeg);
+        if (!_rg || this.stateMs <= 0) { this._pickTarget(); break; }
+        this._moveTo(_rg.nx, _rg.ny, dt, 0.000060);
+        if (Math.hypot(_rg.nx - this.nx, _rg.ny - this.ny) < 0.025) {
+          _rg.harvest(); this._pickTarget();
+        }
+        break;
+      }
+
+      case 'emigrate':
+        this._moveTo(this.tnx, this.tny, dt, 0.000042); // slow — pushing a loaded cart
+        break;
+
+      case 'build_mausoleum':
+        if (!mausoleum || mausoleum.completion >= 1 || this.stateMs <= 0) { this._pickTarget(); break; }
+        this._moveTo(mausoleum.nx, mausoleum.ny, dt, 0.000045, true);
+        break;
+
+      case 'mob': {
+        // Walk toward the burning house; ignite it on arrival
+        const tgt = houses.find(h => h.id === mobTargetId);
+        if (!tgt || tgt.burning || tgt.completion < 0.5) { this.state = 'wander'; break; }
+        const door = tgt.nx + (tgt.nx < 0.5 ? -0.01 : 0.01);
+        this._moveTo(door, tgt.ny + 0.01, dt, 0.000075, false);
+        this.stateMs -= dt;
+        if (Math.abs(this.nx - tgt.nx) < 0.08) {
+          tgt.burning = true;
+          this.state = 'wander';
+        } else if (this.stateMs <= 0) {
+          this.state = 'wander';
+        }
+        break;
+      }
+    }
+  }
+
+  _moveTo(tnx, tny, dt, speed, avoid = true) {
+    // Redirect toward a go-around waypoint if the straight line is blocked.
+    let gtx = tnx, gty = tny;
+    if (avoid) {
+      const det = pathDetour(this.nx, this.ny, tnx, tny);
+      if (det) { gtx = det.nx; gty = det.ny; }
+    }
+    const dx = gtx - this.nx, dy = gty - this.ny;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 0.004) { this.nx = gtx; this.ny = gty; return; }
+    const move = Math.min(dist, speed * dt);
+    const prevNy = this.ny;
+    this.nx += (dx/dist) * move;
+    this.ny += (dy/dist) * move;
+    if (avoid) this.ny = avoidBldgs(this.nx, this.ny, prevNy);
+    this.moving = true;
+  }
+
+  _pickTarget() {
+    this.carryBodyId = null;
+    this.state  = 'wander';
+    this.stateMs = 3000 + Math.random()*8000;
+    this.tnx    = 0.04 + Math.random()*0.92;
+    this.tny    = 0.04 + Math.random()*0.92;
+    // 25% chance to head toward a well-worn track instead of a random spot.
+    if (Math.random() < 0.25) {
+      const tp = trackBiasTarget();
+      if (tp) { this.tnx = tp.nx; this.tny = tp.ny; }
+    }
+    if (this.holdHandMs > 0) return;  // don't break away to build while holding hands
+    if (this.homeId !== null && this.age !== 'child' && !this.isPriest) {
+      const home = houses.find(h => h.id === this.homeId);
+      if (home && (home.completion < 1 || home.extPending) && Math.random() < 0.35) {
+        this.state = 'build'; this.stateMs = 12000 + Math.random()*18000;
+        this.tnx = home.nx;   this.tny = home.ny; return;
+      }
+    }
+    if (mausoleum && mausoleum.completion < 1) {
+      if (this.isPriest) {
+        this.state = 'build_mausoleum'; this.stateMs = 22000 + Math.random()*22000;
+        this.tnx = mausoleum.nx; this.tny = mausoleum.ny; return;
+      }
+      if (this.age !== 'child' && Math.random() < 0.30) {
+        this.state = 'build_mausoleum'; this.stateMs = 12000 + Math.random()*16000;
+        this.tnx = mausoleum.nx; this.tny = mausoleum.ny; return;
+      }
+    }
+    if (this.isPriest && church && church.completion < 1 && Math.random() < 0.6) {
+      this.state = 'build_church'; this.stateMs = 15000 + Math.random()*20000;
+      this.tnx = church.nx; this.tny = church.ny; return;
+    }
+    if (!this.isPriest && church && church.completion < 1 && this.age === 'adult' && Math.random() < 0.15) {
+      this.state = 'build_church'; this.stateMs = 10000 + Math.random()*15000;
+      this.tnx = church.nx; this.tny = church.ny;
+    }
+    // Kitchen garden — build or harvest (adults only, not priest, house complete)
+    if (!this.isPriest && this.age !== 'child' && this.homeId !== null && this.holdHandMs <= 0) {
+      const home = houses.find(h => h.id === this.homeId);
+      if (home && home.completion >= 1) {
+        // Build a new garden beside the house (once conditions are met)
+        const hasGarden = kitchenGardens.some(g => g.houseId === this.homeId);
+        if (!hasGarden && houses.length >= 6 && church && Math.random() < 0.12) {
+          const off = home.nx < 0.5 ? 0.09 : -0.09;
+          const gx  = Math.max(0.05, Math.min(0.92, home.nx + off));
+          const g   = new KitchenGarden(this.homeId, gx, home.ny);
+          kitchenGardens.push(g);
+          this.state = 'build_garden'; this.stateMs = 18000 + Math.random()*12000;
+          this.tnx = g.nx; this.tny = g.ny;
+          return;
+        }
+        // Harvest ripe garden
+        const ripe = kitchenGardens.find(g => g.houseId === this.homeId && g.hasRipeVeg);
+        if (ripe && Math.random() < 0.40) {
+          this.state = 'harvest'; this.stateMs = 8000 + Math.random()*6000;
+          this.tnx = ripe.nx; this.tny = ripe.ny;
+          return;
+        }
+      }
+    }
+    // Re-link with permanent partner when both wandering and close enough (lower id initiates to avoid double-link)
+    if (this.state === 'wander' && this.partnerId !== null && this.id < this.partnerId && this.handPartnerId === null) {
+      const perm = villagers.find(v => v.id === this.partnerId && v.state === 'wander' && v.handPartnerId === null);
+      if (perm && Math.hypot(this.nx - perm.nx, this.ny - perm.ny) < 0.05) {
+        this.handPartnerId = perm.id; perm.handPartnerId = this.id;
+        const dur = 25000 + Math.random() * 35000;
+        this.holdHandMs = dur; perm.holdHandMs = dur;
+      }
+    }
+  }
+
+  _releaseHand() {
+    if (this.handPartnerId !== null) {
+      const partner = villagers.find(v => v.id === this.handPartnerId);
+      if (partner && partner.handPartnerId === this.id) {
+        partner.handPartnerId = null; partner.holdHandMs = 0;
+      }
+    }
+    this.handPartnerId = null; this.holdHandMs = 0;
+  }
+
+  _die() {
+    this._releaseHand();
+    if (this.partnerId !== null) {
+      const perm = villagers.find(v => v.id === this.partnerId);
+      if (perm) perm.partnerId = null;
+      this.partnerId = null;
+    }
+    this.state = 'dead'; this.stateMs = 0;
+    if (this.isPriest && !priestSequence) startPriestSequence(this.nx, this.ny);
+  }
+
+  draw() {
+    const t = tod(), light = ambientLight(t);
+    const s   = this.scale;
+    const x   = this.nx * W;
+    const y   = this.sy;
+    const di  = col => dimHex(col, light);
+    const shirt = di(this._shirtColor());
+    const pants = di(this.isPriest ? C.ROBE : C.PANTS);
+    const skin  = di(this.skinColor || C.SKIN);
+    const hair  = di(this.age === 'old' ? '#e8e8e0' : (this.isPriest ? C.HAIR_GR : this.hairColor));
+
+    if (this.state === 'dead' || this.state === 'being_carried' || this.state === 'at_grave') {
+      const len = 24*s;
+      noisyPoly([[x-len/2,y-3*s],[x+len/2,y-3*s],[x+len/2,y+2*s],[x-len/2,y+2*s]],
+                this.id*31+5, 1*s, shirt);
+      disk(x - len/2 - 5*s, y-1*s, 5*s, skin);
+      cap( x - len/2 - 5*s, y-1*s, 5*s, di(this.age === 'old' ? '#e8e8e0' : this.hairColor));
+      return;
+    }
+    if (this.state === 'sleep' && light < 0.25 && this.homeId !== null) return;
+
+    // Homeless outdoor sleeper — visible at night, lying on the ground
+    if (this.state === 'sleep' && this.homeId === null) {
+      const len = 24 * s;
+      // Leather backpack as pillow (drawn first, under head)
+      noisyPoly([
+        [x - len/2 - 11*s, y - 1*s],
+        [x - len/2 -  1*s, y - 1*s],
+        [x - len/2 -  1*s, y + 4*s],
+        [x - len/2 - 11*s, y + 4*s],
+      ], this.id * 31 + 20, 1.2 * s, di('#7a4c28'));
+      // Buckle strap across backpack
+      box(x - len/2 - 9*s, y + 1*s, 6*s, 1.2*s, di('#5a3210'));
+      // Old worn blanket covering body
+      noisyPoly([
+        [x - len/2 -  1*s, y - 5*s],
+        [x + len/2 +  4*s, y - 5*s],
+        [x + len/2 +  4*s, y + 3*s],
+        [x - len/2 -  1*s, y + 3*s],
+      ], this.id * 31 + 21, 2.2 * s, di('#7a7058'));
+      // Head resting on backpack (drawn on top)
+      disk(x - len/2 - 5*s, y - 1*s, 5*s, skin);
+      cap( x - len/2 - 5*s, y - 1*s, 5*s, hair);
+      return;
+    }
+
+    // Handcart drawn behind emigrating adults (children just walk)
+    if (this.state === 'emigrate' && this.age !== 'child' && this.age !== 'teen') {
+      const f  = this.tnx > this.nx ? 1 : -1;   // direction of travel
+      const cs = H / 1200;                        // cart scale — matches villager scale
+      const cx = x + f * 30 * cs;                // cart centre, ahead of villager
+      // Wheels
+      disk(cx - 9 * cs, y - 6 * cs, 6 * cs, di(C.TREE_TRUNK));
+      disk(cx + 9 * cs, y - 6 * cs, 6 * cs, di(C.TREE_TRUNK));
+      disk(cx - 9 * cs, y - 6 * cs, 2 * cs, di(C.DOOR));
+      disk(cx + 9 * cs, y - 6 * cs, 2 * cs, di(C.DOOR));
+      // Wheel spokes (3 per wheel)
+      ctx.strokeStyle = di(C.DOOR); ctx.lineWidth = 1 * cs;
+      [cx - 9 * cs, cx + 9 * cs].forEach(wx => {
+        const wy = y - 6 * cs;
+        for (let a = 0; a < Math.PI; a += Math.PI / 3) {
+          ctx.beginPath();
+          ctx.moveTo(wx + Math.cos(a) * 5.5 * cs, wy + Math.sin(a) * 5.5 * cs);
+          ctx.lineTo(wx - Math.cos(a) * 5.5 * cs, wy - Math.sin(a) * 5.5 * cs);
+          ctx.stroke();
+        }
+      });
+      // Cart body
+      noisyBox(cx - 13 * cs, y - 20 * cs, 26 * cs, 14 * cs, this.id * 13 + 7, 1.5 * cs, di(C.WALL));
+      // Belongings pile
+      noisyPoly([
+        [cx - 11 * cs, y - 20 * cs], [cx + 11 * cs, y - 20 * cs],
+        [cx +  7 * cs, y - 27 * cs], [cx -  7 * cs, y - 27 * cs],
+      ], this.id * 13 + 8, 2 * cs, di(C.WALL_D));
+      // Small box on top
+      noisyBox(cx - 4 * cs, y - 27 * cs, 8 * cs, 5 * cs, this.id * 13 + 9, 1 * cs, di(C.WALL));
+      // Handles connecting cart to villager
+      const hx1 = cx - f * 13 * cs;  // cart end
+      const hx2 = x  + f *  6 * cs;  // villager end
+      box(Math.min(hx1, hx2), y - 17 * cs, Math.abs(hx1 - hx2), 2 * cs, di(C.CHIMNEY));
+      box(Math.min(hx1, hx2), y - 12 * cs, Math.abs(hx1 - hx2), 2 * cs, di(C.CHIMNEY));
+    }
+
+    // Walking cycle: legs and arms sway only when actually moving this frame
+    const swing = this.moving ? Math.sin(gameTime * 0.0055 + this.id * 2.3) : 0;
+    const sway = swing * 5 * s;
+
+    // Legs / skirt
+    if (this.gender === 'f' && this.age === 'adult') {
+      // Feet peeking from under hem — opposite phase gives alternating step
+      const shoe = di(C.DOOR);
+      disk(x - 3*s + sway * 0.7, y + 1*s, 2.5*s, shoe);
+      disk(x + 3*s - sway * 0.7, y + 1*s, 2.5*s, shoe);
+      noisyPoly([[x-6*s,y-8*s],[x+6*s,y-8*s],[x+9*s,y],[x-9*s,y]], this.id*31+1, 0.7*s, di(C.SKIRT));
+    } else {
+      noisyPoly([[x-6*s,y-8*s],[x-1*s,y-8*s],[x-2*s+sway,y],[x-7*s+sway,y]], this.id*31+1, 0.7*s, pants);
+      noisyPoly([[x+1*s,y-8*s],[x+6*s,y-8*s],[x+7*s+sway,y],[x+2*s+sway,y]], this.id*31+2, 0.7*s, pants);
+    }
+    // Body
+    noisyPoly([[x-6*s,y-21*s],[x+6*s,y-21*s],[x+5*s,y-8*s],[x-5*s,y-8*s]], this.id*31, 0.8*s, shirt);
+    // Arms
+    const ay = y-17*s;
+    const building = this.state === 'build' || this.state === 'build_church' || this.state === 'build_garden' || this.state === 'build_mausoleum';
+    if (building) {
+      const bwave = Math.sin(gameTime * 0.008 + this.id * 2.3) * 7 * s;
+      poly([[x-6*s,ay],[x-4*s,ay],[x-12*s,ay-10*s-bwave],[x-14*s,ay-9*s-bwave]], shirt);
+      poly([[x+6*s,ay],[x+4*s,ay],[x+12*s,ay-10*s-bwave],[x+14*s,ay-9*s-bwave]], shirt);
+    } else {
+      poly([[x-6*s,ay],[x-4*s,ay],[x-11*s-sway*0.5,ay+9*s],[x-13*s-sway*0.5,ay+8*s]], shirt);
+      poly([[x+6*s,ay],[x+4*s,ay],[x+11*s-sway*0.5,ay+9*s],[x+13*s-sway*0.5,ay+8*s]], shirt);
+    }
+    // Walking stick for old people
+    if (this.age === 'old' && !building) {
+      const sx = x + 14*s;
+      poly([[sx,y-9*s],[sx+2*s,y-9*s],[sx+4*s,y+1*s],[sx+2*s,y+1*s]], di(C.TREE_TRUNK));
+    }
+    // Torch for mob villagers
+    if (this.state === 'mob') {
+      const facing = this.tnx >= this.nx ? 1 : -1;
+      const armX = facing > 0 ? x + 11 * s : x - 11 * s;
+      const armY = y - 17 * s;
+      // Stick
+      ctx.strokeStyle = '#6b4a2a'; ctx.lineWidth = 2 * s;
+      ctx.beginPath(); ctx.moveTo(armX, armY); ctx.lineTo(armX, armY - 18 * s); ctx.stroke();
+      // Flame
+      const now = Date.now();
+      ctx.globalAlpha = 0.9;
+      poly([armX - 4 * s, armY - 18 * s, armX + 4 * s, armY - 18 * s, armX + 2 * s, armY - 28 * s, armX, armY - 32 * s, armX - 2 * s, armY - 28 * s], '#ff6600');
+      ctx.globalAlpha = 0.7;
+      poly([armX - 2 * s, armY - 20 * s, armX + 2 * s, armY - 20 * s, armX, armY - 30 * s], '#ffdd00');
+      ctx.globalAlpha = 1;
+    }
+    // Head
+    disk(x, y-28*s, 7*s, skin);
+    cap( x, y-28*s, 7*s, hair);
+    if (this.isPriest) box(x-3*s, y-22*s, 6*s, 5*s, di(C.COLLAR));
+
+    // Hand-hold connection — drawn by the leader (lower id) only
+    if (this.handPartnerId !== null && this.id < this.handPartnerId) {
+      const partner = villagers.find(v => v.id === this.handPartnerId);
+      if (partner && Math.hypot(partner.nx - this.nx, partner.ny - this.ny) < 0.07) {
+        const ps = partner.scale;
+        const px = partner.nx * W, py = partner.sy;
+        const myHx = (x < px) ? x  + 11*s  : x  - 11*s;
+        const ptHx = (px < x) ? px + 11*ps : px - 11*ps;
+        const myHy = y  - 8*s, ptHy = py - 8*ps;
+        const r = 1.5 * Math.min(s, ps);
+        poly([[myHx, myHy-r],[ptHx, ptHy-r],[ptHx, ptHy+r],[myHx, myHy+r]], skin);
+      }
+    }
+  }
+}
+
+// ── BIRD ─────────────────────────────────────────────────────────────────────
+class Bird {
+  constructor() { this._reset(); }
+  _reset() {
+    this.nx    = Math.random() < 0.5 ? -0.04 : 1.04;
+    this.fy    = 0.04 + Math.random()*0.88;  // fraction of sky height
+    this.dnx   = this.nx < 0 ? (0.00006+Math.random()*0.00004) : -(0.00006+Math.random()*0.00004);
+    this.flapT = Math.random()*Math.PI*2;
+  }
+  update(dt) {
+    this.nx += this.dnx * dt;
+    this.flapT += dt * 0.006;
+    if (this.nx < -0.08 || this.nx > 1.08) this._reset();
+  }
+  draw() {
+    const t = tod(), light = ambientLight(t);
+    if (light < 0.28) return;
+    const x = this.nx*W, y = this.fy*skyH(), s = H/600;
+    const flap = Math.sin(this.flapT)*7*s;
+    const col = dimHex(C.BIRD, light);
+    poly([[x,y],[x-14*s,y+flap],[x-5*s,y+1*s]], col);
+    poly([[x,y],[x+14*s,y+flap],[x+5*s,y+1*s]], col);
+  }
+}
+
+// ── DRAGON ───────────────────────────────────────────────────────────────────
+class Dragon {
+  constructor() {
+    this.active = false; this.nx = -0.18; this.fy = 0.3;
+    this.nextAppear = 300000 + Math.random()*500000; this.elapsed = 0;
+  }
+  update(dt) {
+    this.elapsed += dt;
+    if (!this.active) {
+      if (this.elapsed >= this.nextAppear) {
+        this.active = true; this.nx = -0.16;
+        this.fy = 0.08 + Math.random()*0.7;
+      }
+    } else {
+      this.nx += 0.000042 * dt;
+      if (this.nx > 1.18) {
+        this.active = false; this.elapsed = 0;
+        this.nextAppear = 300000 + Math.random()*500000;
+      }
+    }
+  }
+  draw() {
+    if (!this.active) return;
+    const t = tod(), light = ambientLight(t);
+    const x = this.nx*W, y = this.fy*skyH(), s = H/600*0.55;
+    const body = dimHex(C.DRAGON,   light);
+    const wing = dimHex(C.DRAGON_W, light);
+    noisyPoly([[x,y],[x-22*s,y+5*s],[x-26*s,y],[x-20*s,y-4*s]], 888, 1.5*s, body);
+    poly([[x-5*s,y-2*s],[x-6*s,y+3*s],[x+11*s,y-13*s]], wing);
+    poly([[x-5*s,y-2*s],[x-6*s,y+3*s],[x+11*s,y+14*s]], wing);
+    noisyPoly([[x,y],[x+8*s,y-3*s],[x+13*s,y+2*s],[x+7*s,y+5*s]], 8881, 1.5*s, body);
+  }
+}
+
+// ── WIZARD BIRKENOR ──────────────────────────────────────────────────────────
+const WIZ_SKINS  = ['#d0a8e0','#a8d8b8','#f0d888','#98c8e8','#e8a8a8','#c0e8d8','#d0b8f0'];
+const WIZ_SHIRTS = ['#d03890','#3890d0','#d09020','#20b870','#9030c8','#c05018','#18b8b0','#5030d8'];
+
+class Wizard {
+  constructor() {
+    this.active = false; this.nx = -0.06; this.ny = 0.5; this.dnx = 0;
+    this.elapsed = 0; this.nextAppear = 180000 + Math.random()*300000;
+    this.changesLeft = 0;
+  }
+  get sy() { return worldY(this.ny); }
+
+  update(dt) {
+    this.elapsed += dt;
+    if (!this.active) {
+      if (this.elapsed >= this.nextAppear) {
+        this.active = true;
+        this.changesLeft = 3;
+        const fromLeft = Math.random() < 0.5;
+        this.nx  = fromLeft ? -0.06 : 1.06;
+        this.dnx = fromLeft ? 0.000060 : -0.000060;
+        this.ny  = 0.10 + Math.random()*0.80;
+      }
+    } else {
+      this.nx += this.dnx * dt;
+      // Randomly enchant nearby villagers (max 3 per appearance)
+      if (this.changesLeft > 0) {
+        for (const v of villagers) {
+          if (this.changesLeft <= 0) break;
+          if (Math.hypot(v.nx - this.nx, v.ny - this.ny) > 0.12) continue;
+          if (Math.random() > 0.000025 * dt) continue;
+          v.skinColor  = WIZ_SKINS [Math.floor(Math.random() * WIZ_SKINS.length)];
+          v.shirtColor = WIZ_SHIRTS[Math.floor(Math.random() * WIZ_SHIRTS.length)];
+          this.changesLeft--;
+        }
+      }
+      if (this.nx < -0.12 || this.nx > 1.12) {
+        this.active = false; this.elapsed = 0;
+        this.nextAppear = 180000 + Math.random()*300000;
+      }
+    }
+  }
+
+  draw() {
+    if (!this.active) return;
+    const t = tod(), light = ambientLight(t);
+    const s = H / 1200;
+    const x = this.nx * W, y = this.sy;
+    const di = col => dimHex(col, light);
+    const night = light < 0.5;
+
+    // Robe (lower)
+    noisyPoly([[x-8*s,y],[x+8*s,y],[x+6*s,y-8*s],[x-6*s,y-8*s]], 777, 1.5*s, di(C.WIZ_ROBE));
+    // Body
+    noisyPoly([[x-6*s,y-8*s],[x+6*s,y-8*s],[x+5*s,y-22*s],[x-5*s,y-22*s]], 7771, 1.5*s, di(C.WIZ_ROBE));
+    // Staff hand — right arm slightly raised
+    poly([[x+5*s,y-18*s],[x+7*s,y-19*s],[x+15*s,y-44*s],[x+13*s,y-43*s]], di(C.WIZ_STAFF));
+    // Staff orb glow at night
+    const orbX = x+14*s, orbY = y-45*s;
+    if (night) {
+      const g = ctx.createRadialGradient(orbX, orbY, 0, orbX, orbY, 14*s);
+      g.addColorStop(0, 'rgba(128,200,255,0.50)'); g.addColorStop(1, 'rgba(80,140,255,0)');
+      ctx.fillStyle = g; ctx.fillRect(orbX-14*s, orbY-14*s, 28*s, 28*s);
+    }
+    disk(orbX, orbY, 3.5*s, night ? '#b0e0ff' : di(C.WIZ_ORB));
+    // Left arm down
+    poly([[x-5*s,y-18*s],[x-7*s,y-18*s],[x-12*s,y-8*s],[x-10*s,y-8*s]], di(C.WIZ_ROBE));
+    // Head
+    disk(x, y-29*s, 7*s, di(C.SKIN));
+    // Beard
+    noisyPoly([[x-5*s,y-25*s],[x+5*s,y-25*s],[x+4*s,y-13*s],[x-4*s,y-13*s]], 779, 1*s, di(C.WIZ_BEARD));
+    // Hat brim
+    box(x-11*s, y-35*s, 22*s, 3.5*s, di(C.WIZ_HAT));
+    // Hat cone
+    noisyPoly([[x,y-61*s],[x-8*s,y-35*s],[x+8*s,y-35*s]], 778, 1.5*s, di(C.WIZ_HATD));
+    // Moon symbol on hat
+    const sy2 = y-49*s;
+    ctx.strokeStyle = night ? '#e0c800' : di('#b89040'); ctx.lineWidth = 1.2*s;
+    ctx.beginPath(); ctx.arc(x, sy2, 4*s, 0.3, Math.PI*2-0.3); ctx.stroke();
+  }
+}
+
+// ── WOLF ─────────────────────────────────────────────────────────────────────
+class Wolf {
+  constructor() {
+    this.active = false;
+    this.nx = 0.5; this.ny = 0.5;
+    this.tnx = 0.5; this.tny = 0.5;
+    this.stateMs = 0; this.soundMs = 0;
+    this.facing = 1; // 1 = right, -1 = left
+    this.nightRolled = false; // whether we've rolled for this night yet
+  }
+  get sy() { return worldY(this.ny); }
+  _isNight(t) { return t > 0.68 || t < 0.18; }
+
+  update(dt) {
+    const t = tod(), night = this._isNight(t);
+    if (!this.active) {
+      if (!night) { this.nightRolled = false; return; }
+      if (!this.nightRolled) {
+        this.nightRolled = true;
+        if (Math.random() < 0.8) return; // ~1 night in 5
+        const left = Math.random() < 0.5;
+        this.nx = left ? -0.05 : 1.05;
+        this.ny = 0.15 + Math.random() * 0.7;
+        this.facing = left ? 1 : -1;
+        this._pickTarget();
+        this.active = true;
+        this.soundMs = 2000 + Math.random() * 3000;
+      }
+      return;
+    }
+    if (!night) {
+      // leave toward nearest edge at dawn
+      const tx = this.nx < 0.5 ? -0.1 : 1.1;
+      const dx = tx - this.nx;
+      const move = Math.min(Math.abs(dx), 0.00014 * dt);
+      this.nx += (dx > 0 ? 1 : -1) * move;
+      if (this.nx < -0.08 || this.nx > 1.08) this.active = false;
+      return;
+    }
+    this.stateMs -= dt;
+    if (this.stateMs <= 0) this._pickTarget();
+    const dx = this.tnx - this.nx, dy = this.tny - this.ny;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 0.006) {
+      const move = Math.min(dist, 0.000095 * dt);
+      this.nx += (dx / dist) * move;
+      this.ny += (dy / dist) * move;
+      if (Math.abs(dx) > 0.002) this.facing = dx > 0 ? 1 : -1;
+    }
+    this.soundMs -= dt;
+    if (this.soundMs <= 0) { playWolfGuitar(); this.soundMs = 7000 + Math.random() * 9000; }
+  }
+
+  _pickTarget() {
+    this.tnx = 0.05 + Math.random() * 0.9;
+    this.tny = 0.1  + Math.random() * 0.8;
+    this.stateMs = 4000 + Math.random() * 7000;
+  }
+
+  draw() {
+    if (!this.active) return;
+    const t = tod(), light = ambientLight(t);
+    const s = H / 600 * 0.60;
+    const x = this.nx * W, y = this.sy;
+    const body = dimHex('#4a4038', light);
+    const dark = dimHex('#222018', light);
+    ctx.save();
+    ctx.translate(x, 0); ctx.scale(this.facing, 1); ctx.translate(-x, 0);
+    // Body
+    noisyPoly([[x-20*s,y-4*s],[x+12*s,y-6*s],[x+12*s,y+2*s],[x-20*s,y+2*s]], 6661, 1.2*s, body);
+    // Head/neck
+    noisyPoly([[x+10*s,y-10*s],[x+20*s,y-8*s],[x+22*s,y],[x+10*s,y]], 6662, 0.8*s, body);
+    // Snout
+    poly([[x+19*s,y-5*s],[x+26*s,y-3*s],[x+25*s,y+1*s],[x+19*s,y+1*s]], dark);
+    // Ear
+    poly([[x+13*s,y-10*s],[x+16*s,y-18*s],[x+20*s,y-10*s]], dark);
+    // Tail (raised behind rump)
+    noisyPoly([[x-20*s,y-4*s],[x-28*s,y-16*s],[x-25*s,y-18*s],[x-17*s,y-6*s]], 6663, 1.5*s, body);
+    // Legs (4 thin boxes)
+    box(x-14*s, y+2*s, 3.5*s, 8*s, dark);
+    box(x-6*s,  y+2*s, 3.5*s, 8*s, dark);
+    box(x+2*s,  y+2*s, 3.5*s, 8*s, dark);
+    box(x+8*s,  y+2*s, 3.5*s, 7*s, dark);
+    // Amber eye
+    disk(x+19*s, y-6*s, 1.5*s, '#d4b820');
+    ctx.restore();
+  }
+}
+
+// ── GROUND BIRDS ─────────────────────────────────────────────────────────────
+class GroundBird {
+  constructor(seed) {
+    this.seed = seed;
+    this.nx = 0.08 + srand(seed, 0) * 0.84;
+    this.ny = 0.62 + srand(seed, 1) * 0.34;
+    this.tnx = this.nx; this.tny = this.ny;
+    this.startNx = this.nx; this.startNy = this.ny;
+    this.state = 'perch'; this.stateMs = 1000 + srand(seed, 2) * 6000;
+    this.hopProgress = 0; this.facing = 1; this.animT = srand(seed, 3) * 6;
+  }
+  get sy() { return worldY(this.ny); }
+  update(dt) {
+    if (ambientLight(tod()) < 0.28) return;
+    this.animT += dt * 0.007;
+    this.stateMs -= dt;
+    if (this.state === 'perch') {
+      if (this.stateMs <= 0) {
+        const fly = Math.random() < 0.18;
+        const range = fly ? 0.26 : 0.09;
+        this.tnx = Math.max(0.02, Math.min(0.98, this.nx + (Math.random()-0.5)*range));
+        this.tny = Math.max(0.58, Math.min(0.98, this.ny + (Math.random()-0.5)*range*0.35));
+        this.startNx = this.nx; this.startNy = this.ny;
+        this.hopProgress = 0; this.state = fly ? 'fly' : 'hop';
+        this.stateMs = fly ? 650 : 260;
+        if (Math.abs(this.tnx - this.nx) > 0.002)
+          this.facing = this.tnx > this.nx ? 1 : -1;
+      }
+    } else {
+      const dur = this.state === 'fly' ? 650 : 260;
+      this.hopProgress = Math.min(1, this.hopProgress + dt / dur);
+      this.nx = lerp(this.startNx, this.tnx, this.hopProgress);
+      this.ny = lerp(this.startNy, this.tny, this.hopProgress);
+      if (this.hopProgress >= 1) { this.state = 'perch'; this.stateMs = 1200 + Math.random()*5000; }
+    }
+  }
+  draw() {
+    const t = tod(), light = ambientLight(t);
+    if (light < 0.28) return;
+    const s = H / 600 * 0.40;
+    const x = this.nx * W, y = this.sy;
+    const di = col => dimHex(col, light);
+    const arcH = this.state === 'fly' ? 20 : (this.state === 'hop' ? 8 : 0);
+    const bounce = -Math.sin(this.hopProgress * Math.PI) * arcH * s;
+    const bob = this.state === 'perch' ? Math.sin(this.animT * 1.4) * 1.3 * s : 0;
+    ctx.save();
+    ctx.translate(x, 0); ctx.scale(this.facing, 1); ctx.translate(-x, 0);
+    const bx = x, by = y + bounce + bob;
+    // Body
+    ctx.beginPath(); ctx.ellipse(bx, by-3*s, 6*s, 4*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = di('#3a62c0'); ctx.fill();
+    // Yellow belly
+    ctx.beginPath(); ctx.ellipse(bx+0.5*s, by-2.2*s, 4*s, 2.6*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = di('#d4b020'); ctx.fill();
+    // Wing bar
+    box(bx-5*s, by-4.8*s, 8*s, 1.6*s, di('#8ab0e8'));
+    // Tail fan
+    poly([[bx-6*s,by-3*s],[bx-11*s,by-5*s],[bx-11*s,by-1.5*s]], di('#1e3a80'));
+    // Head
+    disk(bx+6*s, by-7.5*s, 3.5*s, di('#3a62c0'));
+    // Beak
+    poly([[bx+9*s,by-8*s],[bx+14*s,by-7*s],[bx+9*s,by-6.5*s]], di('#d4b020'));
+    // Eye
+    disk(bx+7.5*s, by-9*s, 1.1*s, '#080808');
+    disk(bx+7.8*s, by-9.3*s, 0.45*s, '#ffffff');
+    // Legs
+    box(bx+1*s, by-0.5*s, 1.6*s, 4*s, di('#c09020'));
+    box(bx+4*s, by-0.5*s, 1.6*s, 4*s, di('#c09020'));
+    ctx.restore();
+  }
+}
+
+// ── RABBIT ───────────────────────────────────────────────────────────────────
+class Rabbit {
+  constructor(seed) {
+    this.seed = seed;
+    this.nx = 0.06 + srand(seed, 20) * 0.88;
+    this.ny = 0.55 + srand(seed, 21) * 0.42;
+    this.tnx = this.nx; this.tny = this.ny;
+    this.startNx = this.nx; this.startNy = this.ny;
+    this.state = 'sit'; this.stateMs = 2000 + srand(seed, 22) * 9000;
+    this.hopProgress = 0; this.facing = 1;
+    this.robGardenId = null;
+  }
+  get sy() { return worldY(this.ny); }
+  update(dt) {
+    this.stateMs -= dt;
+    if (this.state === 'sit') {
+      if (this.stateMs <= 0) {
+        // Chance to target a nearby ripe garden
+        if (Math.random() < 0.15) {
+          const target = kitchenGardens.find(g =>
+            g.hasRipeVeg && Math.hypot(g.nx - this.nx, g.ny - this.ny) < 0.15);
+          if (target) {
+            this.tnx = target.nx; this.tny = target.ny;
+            this.startNx = this.nx; this.startNy = this.ny;
+            this.hopProgress = 0; this.state = 'hop'; this.stateMs = 400;
+            this.robGardenId = target.id;
+            if (Math.abs(this.tnx - this.nx) > 0.002) this.facing = this.tnx > this.nx ? 1 : -1;
+            return;
+          }
+        }
+        if (Math.random() < 0.25) {
+          this.state = 'freeze'; this.stateMs = 1200 + Math.random()*2500;
+        } else {
+          this.tnx = Math.max(0.02, Math.min(0.98, this.nx + (Math.random()-0.5)*0.18));
+          this.tny = Math.max(0.50, Math.min(0.98, this.ny + (Math.random()-0.5)*0.10));
+          this.startNx = this.nx; this.startNy = this.ny;
+          this.hopProgress = 0; this.state = 'hop'; this.stateMs = 340;
+          if (Math.abs(this.tnx-this.nx) > 0.002)
+            this.facing = this.tnx > this.nx ? 1 : -1;
+        }
+      }
+    } else if (this.state === 'freeze') {
+      if (this.stateMs <= 0) { this.state = 'sit'; this.stateMs = 3000 + Math.random()*8000; }
+    } else {
+      this.hopProgress = Math.min(1, this.hopProgress + dt / 340);
+      this.nx = lerp(this.startNx, this.tnx, this.hopProgress);
+      this.ny = lerp(this.startNy, this.tny, this.hopProgress);
+      if (this.hopProgress >= 1) {
+        if (this.robGardenId !== null) {
+          const _rg = kitchenGardens.find(g => g.id === this.robGardenId);
+          if (_rg) {
+            const stealable = _rg.rows.filter(r => !r.stolen && _rg.grown);
+            if (stealable.length > 0)
+              stealable[Math.floor(Math.random() * stealable.length)].stolen = true;
+          }
+          this.robGardenId = null;
+        }
+        this.state = 'sit'; this.stateMs = 1500 + Math.random()*8000;
+      }
+    }
+  }
+  draw() {
+    const t = tod(), light = ambientLight(t);
+    const s = H / 600 * 0.28;
+    const x = this.nx * W, y = this.sy;
+    const di = col => dimHex(col, light);
+    const bounce = this.state === 'hop' ? -Math.sin(this.hopProgress * Math.PI) * 10 * s : 0;
+    const earsUp = this.state !== 'hop';
+    ctx.save();
+    ctx.translate(x, 0); ctx.scale(this.facing, 1); ctx.translate(-x, 0);
+    const bx = x, by = y + bounce;
+    // Hind haunch
+    ctx.beginPath(); ctx.ellipse(bx-5*s, by-4*s, 8*s, 5*s, 0.1, 0, Math.PI*2);
+    ctx.fillStyle = di('#8a7868'); ctx.fill();
+    // Body
+    ctx.beginPath(); ctx.ellipse(bx+2*s, by-5.5*s, 7*s, 5*s, -0.1, 0, Math.PI*2);
+    ctx.fillStyle = di('#8a7868'); ctx.fill();
+    // Belly
+    ctx.beginPath(); ctx.ellipse(bx+2*s, by-4*s, 4.5*s, 3*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = di('#b0a090'); ctx.fill();
+    // Head
+    disk(bx+9.5*s, by-9.5*s, 5.5*s, di('#8a7868'));
+    // Ears
+    const lean = earsUp ? 0 : -3*s;
+    poly([[bx+7*s,by-14*s],[bx+7*s+lean,by-29*s],[bx+10*s+lean,by-29*s],[bx+10*s,by-14*s]], di('#7a6858'));
+    poly([[bx+8*s,by-14*s],[bx+8*s+lean,by-27*s],[bx+10.5*s+lean,by-27*s],[bx+10.5*s,by-14*s]], di('#d09090'));
+    poly([[bx+11*s,by-14*s],[bx+11*s+lean,by-28*s],[bx+14.5*s+lean,by-28*s],[bx+14.5*s,by-14*s]], di('#7a6858'));
+    poly([[bx+12*s,by-14*s],[bx+12*s+lean,by-26*s],[bx+14.5*s+lean,by-26*s],[bx+14.5*s,by-14*s]], di('#d09090'));
+    // Nose + eye
+    disk(bx+14.5*s, by-8.5*s, 1.4*s, di('#d08880'));
+    disk(bx+12.5*s, by-11.5*s, 1.5*s, '#180808');
+    // White tail
+    disk(bx-12*s, by-5*s, 4*s, di('#e0d8d0'));
+    // Paws
+    ctx.beginPath(); ctx.ellipse(bx-3*s, by, 5*s, 2*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = di('#7a6858'); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(bx+4.5*s, by, 3*s, 1.5*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = di('#7a6858'); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── FERRET ───────────────────────────────────────────────────────────────────
+class Ferret {
+  constructor() {
+    this.active = false; this.nx = 0; this.ny = 0.5;
+    this.dnx = 0; this.facing = 1;
+    this.elapsed = 0; this.nextAppear = 480000 + Math.random()*720000;
+    this.animT = 0;
+  }
+  get sy() { return worldY(this.ny); }
+  update(dt) {
+    this.elapsed += dt;
+    if (!this.active) {
+      if (this.elapsed >= this.nextAppear) {
+        this.active = true;
+        const left = Math.random() < 0.5;
+        this.nx = left ? -0.08 : 1.08;
+        this.dnx = left ? 0.00019 : -0.00019;
+        this.facing = left ? 1 : -1;
+        this.ny = 0.52 + Math.random() * 0.44;
+        this.animT = 0;
+      }
+    } else {
+      this.nx += this.dnx * dt;
+      this.animT += dt * 0.013;
+      if (this.nx < -0.14 || this.nx > 1.14) {
+        this.active = false; this.elapsed = 0;
+        this.nextAppear = 480000 + Math.random() * 720000;
+      }
+    }
+  }
+  draw() {
+    if (!this.active) return;
+    const t = tod(), light = ambientLight(t);
+    const s = H / 600 * 0.50;
+    const x = this.nx * W, y = this.sy;
+    const di = col => dimHex(col, light);
+    const wave = Math.sin(this.animT) * 2.5 * s;
+    ctx.save();
+    ctx.translate(x, 0); ctx.scale(this.facing, 1); ctx.translate(-x, 0);
+    // Rear body segment
+    ctx.beginPath(); ctx.ellipse(x-10*s, y-4*s+wave, 9*s, 4*s, 0.15, 0, Math.PI*2);
+    ctx.fillStyle = di('#c8b888'); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x-10*s, y-6.8*s+wave, 9*s, 1.8*s, 0.15, 0, Math.PI*2);
+    ctx.fillStyle = di('#6a4820'); ctx.fill();
+    // Mid connector
+    ctx.beginPath(); ctx.ellipse(x, y-4*s-wave*0.2, 4*s, 3.5*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = di('#c8b888'); ctx.fill();
+    // Front body segment
+    ctx.beginPath(); ctx.ellipse(x+10*s, y-5*s-wave, 9*s, 3.8*s, -0.15, 0, Math.PI*2);
+    ctx.fillStyle = di('#c8b888'); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+10*s, y-7.8*s-wave, 9*s, 1.8*s, -0.15, 0, Math.PI*2);
+    ctx.fillStyle = di('#6a4820'); ctx.fill();
+    // Head
+    disk(x+19*s, y-7.5*s-wave, 4.5*s, di('#c8b888'));
+    // Dark mask
+    ctx.beginPath(); ctx.ellipse(x+21*s, y-8*s-wave, 4*s, 3*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = di('#4a3010'); ctx.fill();
+    // Nose + eye
+    disk(x+24.5*s, y-7.5*s-wave, 1.2*s, di('#d07060'));
+    disk(x+21.5*s, y-9.5*s-wave, 1.1*s, '#080808');
+    // Ear
+    poly([[x+16*s,y-11.5*s-wave],[x+16.5*s,y-16*s-wave],[x+19.5*s,y-11.5*s-wave]], di('#a89060'));
+    // Bushy tail
+    ctx.beginPath(); ctx.ellipse(x-19*s, y-3*s+wave, 6*s, 2.5*s, 0.25, 0, Math.PI*2);
+    ctx.fillStyle = di('#3a2208'); ctx.fill();
+    // Legs (4)
+    box(x-14*s, y, 2.2*s, 4*s, di('#9a8860'));
+    box(x-7*s,  y, 2.2*s, 4*s, di('#9a8860'));
+    box(x+5*s,  y, 2.2*s, 4*s, di('#9a8860'));
+    box(x+12*s, y, 2.2*s, 4*s, di('#9a8860'));
+    ctx.restore();
+  }
+}
+
+// ── BEAR ─────────────────────────────────────────────────────────────────────
+class Bear {
+  constructor() {
+    this.active = false; this.nx = 0; this.ny = 0.5;
+    this.dnx = 0; this.facing = 1;
+    this.elapsed = 0; this.nextAppear = 180000 + Math.random()*300000;
+    this.animT = 0;
+  }
+  get sy() { return worldY(this.ny); }
+  update(dt) {
+    this.elapsed += dt;
+    if (!this.active) {
+      if (this.elapsed >= this.nextAppear) {
+        this.active = true;
+        const left = Math.random() < 0.5;
+        this.nx = left ? -0.12 : 1.12;
+        this.dnx = left ? 0.000058 : -0.000058;
+        this.facing = left ? 1 : -1;
+        this.ny = 0.28 + Math.random() * 0.60;
+        this.animT = 0;
+      }
+    } else {
+      this.nx += this.dnx * dt;
+      this.animT += dt * 0.0042;
+      if (this.nx < -0.18 || this.nx > 1.18) {
+        this.active = false; this.elapsed = 0;
+        this.nextAppear = 900000 + Math.random() * 1500000;
+      }
+    }
+  }
+  draw() {
+    if (!this.active) return;
+    const t = tod(), light = ambientLight(t);
+    const s = H / 1200 * 1.4;  // slightly bigger than a villager, not huge
+    const x = this.nx * W, y = this.sy;
+    const di = col => dimHex(col, light);
+    const body = di('#5a3820'), dark = di('#3c2212'), muzz = di('#7a5838');
+    const waddle = Math.sin(this.animT) * 1.5 * s;
+    const ls     = Math.sin(this.animT) * 3 * s;
+    ctx.save();
+    ctx.translate(x, 0); ctx.scale(this.facing, 1); ctx.translate(-x, 0);
+    // Hind legs
+    noisyPoly([[x-8*s,y-5*s],[x-4*s,y-5*s],[x-3*s-ls,y+1*s],[x-8*s-ls,y+1*s]], 5553, 1*s, dark);
+    noisyPoly([[x-12*s,y-4*s],[x-8*s,y-4*s],[x-9*s+ls*0.5,y+1*s],[x-13*s+ls*0.5,y+1*s]], 5554, 1*s, dark);
+    // Main body — low, stocky
+    ctx.beginPath(); ctx.ellipse(x-1*s, y-8*s, 13*s, 7*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = body; ctx.fill();
+    // Shoulder hump
+    ctx.beginPath(); ctx.ellipse(x+7*s, y-12*s+waddle*0.3, 7*s, 5*s, -0.2, 0, Math.PI*2);
+    ctx.fillStyle = body; ctx.fill();
+    // Front legs
+    noisyPoly([[x+6*s,y-6*s],[x+10*s,y-6*s],[x+11*s+ls,y+1*s],[x+7*s+ls,y+1*s]], 5551, 1*s, dark);
+    noisyPoly([[x+2*s,y-5*s],[x+6*s,y-5*s],[x+5*s-ls,y+1*s],[x+1*s-ls,y+1*s]], 5552, 1*s, dark);
+    // Neck
+    ctx.beginPath(); ctx.ellipse(x+11*s, y-13*s+waddle*0.5, 5*s, 5*s, 0.3, 0, Math.PI*2);
+    ctx.fillStyle = body; ctx.fill();
+    // Head
+    disk(x+14*s, y-18*s+waddle, 8*s, body);
+    // Small round bear ears — filled disks, not semicircles
+    disk(x+8*s,  y-25*s+waddle, 3.5*s, body);
+    disk(x+15*s, y-25*s+waddle, 3.5*s, body);
+    disk(x+8*s,  y-25*s+waddle, 1.8*s, dark);
+    disk(x+15*s, y-25*s+waddle, 1.8*s, dark);
+    // Narrow pointy snout (NOT a wide cow muzzle)
+    ctx.beginPath(); ctx.ellipse(x+19*s, y-15*s+waddle, 4.5*s, 2.8*s, -0.1, 0, Math.PI*2);
+    ctx.fillStyle = muzz; ctx.fill();
+    poly([[x+21*s,y-16.5*s+waddle],[x+21*s,y-13.5*s+waddle],[x+25*s,y-15*s+waddle]], muzz);
+    // Nose tip
+    disk(x+24.5*s, y-15*s+waddle, 1.4*s, dark);
+    // Eye
+    disk(x+16*s, y-21*s+waddle, 1.8*s, '#080808');
+    disk(x+16.5*s, y-21.5*s+waddle, 0.7*s, '#ffffff');
+    ctx.restore();
+  }
+}
+
+// ── GHOST ─────────────────────────────────────────────────────────────────────
+class Ghost {
+  constructor() {
+    this.active = false;
+    this.nx = 0.5; this.ny = 0.5;
+    this.tnx = 0.5; this.tny = 0.5;
+    this.stateMs = 0; this.soundMs = 0;
+    this.nightRolled = false;
+    this.phase = 0;
+  }
+  get sy() { return worldY(this.ny); }
+  _isDeepNight(t) { return t > 0.78 || t < 0.12; }
+
+  update(dt) {
+    const t = tod(), deepNight = this._isDeepNight(t);
+    this.phase += dt * 0.0025;
+
+    if (!this.active) {
+      if (!deepNight) { this.nightRolled = false; return; }
+      if (!this.nightRolled) {
+        this.nightRolled = true;
+        if (!graveyard || graveyard.crosses.length === 0) return;
+        // 4% at 1 grave, linear ramp to 13% at 30 graves
+        const chance = Math.min(0.13, 0.04 + (graveyard.crosses.length - 1) * (0.09 / 29));
+        if (Math.random() > chance) return;
+        const cross = graveyard.crosses[Math.floor(Math.random() * graveyard.crosses.length)];
+        this.nx = cross.nx + (Math.random() - 0.5) * 0.04;
+        this.ny = cross.ny + (Math.random() - 0.5) * 0.04;
+        this._pickTarget();
+        this.active = true;
+        this.soundMs = 1500 + Math.random() * 3000;
+      }
+      return;
+    }
+
+    if (!deepNight) { this.active = false; return; }
+
+    this.stateMs -= dt;
+    if (this.stateMs <= 0) this._pickTarget();
+    const dx = this.tnx - this.nx, dy = this.tny - this.ny;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 0.005) {
+      const move = Math.min(dist, 0.000028 * dt); // very slow drift
+      this.nx += (dx / dist) * move;
+      this.ny += (dy / dist) * move;
+    }
+    this.soundMs -= dt;
+    if (this.soundMs <= 0) { playGhostMoan(); this.soundMs = 10000 + Math.random() * 14000; }
+  }
+
+  _pickTarget() {
+    const gx = graveyard ? graveyard.nx : 0.5;
+    const gy = graveyard ? graveyard.ny : 0.5;
+    this.tnx = Math.max(0.05, Math.min(0.95, gx + (Math.random() - 0.5) * 0.45));
+    this.tny = Math.max(0.05, Math.min(0.95, gy + (Math.random() - 0.5) * 0.30));
+    this.stateMs = 5000 + Math.random() * 10000;
+  }
+
+  draw() {
+    if (!this.active) return;
+    const s = H / 1200;
+    const x = this.nx * W;
+    const y = this.sy + Math.sin(this.phase) * 5 * s; // gentle vertical bob
+
+    // Outer glow
+    const gr = ctx.createRadialGradient(x, y - 18 * s, 0, x, y - 18 * s, 34 * s);
+    gr.addColorStop(0, 'rgba(180,255,210,0.18)');
+    gr.addColorStop(1, 'rgba(160,255,200,0)');
+    ctx.fillStyle = gr;
+    ctx.fillRect(x - 34 * s, y - 52 * s, 68 * s, 68 * s);
+
+    ctx.save();
+    ctx.globalAlpha = 0.72;
+    // Wispy shroud base
+    poly([
+      [x - 10 * s, y - 4 * s], [x + 10 * s, y - 4 * s],
+      [x +  6 * s, y + 7 * s], [x +  2 * s, y + 14 * s],
+      [x,          y + 16 * s],
+      [x -  2 * s, y + 14 * s], [x -  6 * s, y + 7 * s],
+    ], '#d8fff2');
+    // Main body
+    ctx.beginPath();
+    ctx.ellipse(x, y - 18 * s, 11 * s, 18 * s, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#eafff8'; ctx.fill();
+    ctx.globalAlpha = 0.88;
+    // Hollow eye sockets
+    ctx.beginPath(); ctx.ellipse(x - 4.5 * s, y - 21 * s, 3 * s, 3.5 * s, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#081408'; ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x + 4.5 * s, y - 21 * s, 3 * s, 3.5 * s, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#081408'; ctx.fill();
+    // Open mouth
+    ctx.beginPath(); ctx.ellipse(x, y - 13 * s, 2.5 * s, 3 * s, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#081408'; ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── ANGEL ─────────────────────────────────────────────────────────────────────
+class Angel {
+  constructor(nx, ny, seed) {
+    this.nx = nx; this.ny = ny;
+    this.seed = seed;
+    this.tnx = nx; this.tny = ny;
+    this.wingT = 0;
+  }
+  get sy() { return worldY(this.ny); }
+  update(dt) {
+    this.wingT += dt * 0.003;
+    const speed = 0.00014;
+    const dx = this.tnx - this.nx, dy = this.tny - this.ny;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 0.001) {
+      const move = Math.min(dist, speed * dt);
+      this.nx += (dx / dist) * move;
+      this.ny += (dy / dist) * move;
+    }
+  }
+  draw() {
+    const t = tod(), light = ambientLight(t);
+    const di = col => dimHex(col, light);
+    const x = this.nx * W, y = worldY(this.ny);
+    const s = H / 1200;
+    const white = di('#f0f0ff');
+    const cream = di('#fefce8');
+    const gold  = di('#e8c030');
+    const skin  = di(C.SKIN);
+    const wflap = Math.sin(this.wingT * 2.2) * 12 * s;
+    // Left wing — swept polygon
+    poly([
+      [x - 4*s, y - 26*s],
+      [x - 30*s, y - 30*s + wflap],
+      [x - 22*s, y - 18*s + wflap * 0.4],
+      [x - 4*s, y - 16*s],
+    ], cream);
+    // Right wing — symmetric
+    poly([
+      [x + 4*s, y - 26*s],
+      [x + 30*s, y - 30*s + wflap],
+      [x + 22*s, y - 18*s + wflap * 0.4],
+      [x + 4*s, y - 16*s],
+    ], cream);
+    // Robe
+    poly([[x-6*s, y-28*s],[x+6*s, y-28*s],[x+9*s, y],[x-9*s, y]], white);
+    // Sleeves / arms raised in prayer
+    poly([[x-6*s, y-26*s],[x-16*s, y-20*s],[x-14*s, y-17*s],[x-4*s, y-24*s]], white);
+    poly([[x+6*s, y-26*s],[x+16*s, y-20*s],[x+14*s, y-17*s],[x+4*s, y-24*s]], white);
+    // Head
+    disk(x, y - 34*s, 6*s, skin);
+    // Halo
+    ctx.beginPath();
+    ctx.arc(x, y - 42*s, 7*s, 0, Math.PI * 2);
+    ctx.strokeStyle = gold; ctx.lineWidth = 2 * s;
+    ctx.globalAlpha = 0.9; ctx.stroke(); ctx.globalAlpha = 1;
+  }
+}
+
+// ── MAUSOLEUM ─────────────────────────────────────────────────────────────────
+class Mausoleum {
+  constructor(nx, ny, interredCount) {
+    this.id = nextId++;
+    this.nx = nx; this.ny = ny;
+    this.completion = 0; this.buildMs = 0;
+    this.interredCount = interredCount;
+  }
+  get sy() { return worldY(this.ny); }
+  get elaborateness() {
+    return Math.min(1, Math.max(0, ((graveyard ? graveyard.totalDead : 0) - 100) / 400));
+  }
+  update(dt) {
+    const workers = villagers.filter(v =>
+      v.state === 'build_mausoleum' &&
+      Math.hypot(v.nx - this.nx, v.ny - this.ny) < 0.08
+    ).length;
+    this.buildMs += dt * workers;
+    this.completion = Math.min(1, this.buildMs / 500000);
+  }
+  draw() {
+    const t = tod(), light = ambientLight(t);
+    const di = hex => dimHex(hex, light);
+    const c = this.completion;
+    if (c <= 0) return;
+    const bldA = Math.min(1, c * 4);
+    const e = this.elaborateness;
+    const ea = (lo, hi) => Math.max(0, Math.min(1, (e - lo) / (hi - lo)));
+    const x = this.nx * W;
+    const y = this.sy;
+    const s = H / 1200;
+    // Colors
+    const stone  = di('#c8c0ac');
+    const stoneD = di('#807060');
+    const colS   = di('#d4ceba');
+    const iron   = di('#262620');
+    const gold   = di('#b88830');
+    // Pre-computed vertical positions
+    const doorbase    = y - 10 * s;
+    const bodyTop     = doorbase - 48 * s;
+    const corniceTopY = bodyTop - 7 * s;
+    const pedTipY     = corniceTopY - 24 * s;
+    const drumTopY    = pedTipY - 7 * s;
+    const domeCtrY    = drumTopY - 15 * s;
+    const domeTopY    = domeCtrY - 15 * s;
+    const twTopY      = domeTopY - 30 * s;
+    const tcornY      = twTopY - 4 * s;
+    const spTipY      = tcornY - 32 * s;
+
+    ctx.save();
+    ctx.globalAlpha = bldA;
+
+    // 3 stone steps (always)
+    for (let i = 0; i < 3; i++) {
+      const sw = (88 + (3 - i) * 8) * s;
+      box(x - sw / 2, y - (3 - i) * 4 * s, sw, 4 * s, i === 0 ? stoneD : stone);
+    }
+
+    // Main rectangular body (always)
+    const bw = 88 * s, bh = 48 * s;
+    box(x - bw / 2, bodyTop, bw, bh, stone);
+    box(x - bw / 2, bodyTop, 6 * s, bh, stoneD);
+    box(x + bw / 2 - 6 * s, bodyTop, 6 * s, bh, stoneD);
+
+    // Side wings (e > 0.52)
+    if (e > 0.52) {
+      const wingA = ea(0.52, 0.65);
+      ctx.globalAlpha = bldA * wingA;
+      const ww = 24 * s, wh = 36 * s;
+      const wy = y - wh - 12 * s;
+      box(x - bw / 2 - ww, wy, ww, wh, stone);
+      box(x + bw / 2,       wy, ww, wh, stone);
+      box(x - bw / 2 - ww, wy - 5 * s, ww, 5 * s, stoneD);
+      box(x + bw / 2,       wy - 5 * s, ww, 5 * s, stoneD);
+      ctx.globalAlpha = bldA;
+    }
+
+    // Arched doorway + stone surround (always)
+    box(x - 10 * s, doorbase - 26 * s, 20 * s, 28 * s, stoneD);
+    ctx.beginPath();
+    ctx.arc(x, doorbase - 18 * s, 8 * s, Math.PI, 0);
+    ctx.rect(x - 8 * s, doorbase - 18 * s, 16 * s, 18 * s);
+    ctx.fillStyle = di('#1a1410'); ctx.fill();
+
+    // Doorway pilasters with fluting (e > 0)
+    if (e > 0) {
+      const pilA = ea(0, 0.15);
+      ctx.globalAlpha = bldA * pilA;
+      for (const side of [-1, 1]) {
+        const px = x + side * 12 * s;
+        box(px - 3 * s, doorbase - 32 * s, 6 * s, 32 * s, colS);
+        for (let f = 1; f <= 3; f++) box(px - 3 * s + f * 1.2 * s, doorbase - 30 * s, 0.6 * s, 28 * s, stoneD);
+        box(px - 4 * s, doorbase - 33 * s, 8 * s, 3 * s, stoneD);
+        box(px - 4 * s, doorbase - 3 * s,  8 * s, 3 * s, stoneD);
+      }
+      ctx.globalAlpha = bldA;
+    }
+
+    // Corner pilasters (e > 0.22)
+    if (e > 0.22) {
+      const cpA = ea(0.22, 0.38);
+      ctx.globalAlpha = bldA * cpA;
+      for (const side of [-1, 1]) {
+        const px = x + side * (bw / 2 - 5 * s);
+        box(px - 4 * s, bodyTop, 8 * s, bh, colS);
+        box(px - 5 * s, bodyTop - 3 * s, 10 * s, 3 * s, stoneD);
+        box(px - 5 * s, bodyTop + bh,    10 * s, 3 * s, stoneD);
+      }
+      ctx.globalAlpha = bldA;
+    }
+
+    // Cornice band (always)
+    box(x - bw / 2 - 4 * s, corniceTopY, bw + 8 * s, 7 * s, stoneD);
+
+    // Triangular pediment (e > 0.32)
+    if (e > 0.32) {
+      const pedA = ea(0.32, 0.48);
+      ctx.globalAlpha = bldA * pedA;
+      poly([[x - bw / 2 - 4 * s, corniceTopY], [x + bw / 2 + 4 * s, corniceTopY], [x, pedTipY]], stone);
+      ctx.strokeStyle = stoneD; ctx.lineWidth = 1.5 * s;
+      ctx.beginPath();
+      ctx.moveTo(x - bw / 2 - 4 * s, corniceTopY);
+      ctx.lineTo(x, pedTipY);
+      ctx.lineTo(x + bw / 2 + 4 * s, corniceTopY);
+      ctx.stroke();
+      ctx.globalAlpha = bldA;
+    }
+
+    // Carved circular relief + cross in pediment (e > 0.44)
+    if (e > 0.44) {
+      const relA = ea(0.44, 0.58);
+      ctx.globalAlpha = bldA * relA;
+      const relY = corniceTopY + (pedTipY - corniceTopY) * 0.55;
+      disk(x, relY, 8 * s, stoneD);
+      disk(x, relY, 6 * s, stone);
+      box(x - 1 * s, relY - 4 * s, 2 * s, 8 * s, stoneD);
+      box(x - 4 * s, relY - 1 * s, 8 * s, 2 * s, stoneD);
+      ctx.globalAlpha = bldA;
+    }
+
+    // Drum + dome + ribs (e > 0.46)
+    if (e > 0.46) {
+      const domA = ea(0.46, 0.60);
+      ctx.globalAlpha = bldA * domA;
+      const dr = 18 * s;
+      box(x - dr, drumTopY, dr * 2, 7 * s, stone);
+      ctx.beginPath();
+      ctx.arc(x, domeCtrY, 15 * s, Math.PI, 0);
+      ctx.fillStyle = stone; ctx.fill();
+      ctx.strokeStyle = stoneD; ctx.lineWidth = 0.8 * s;
+      for (let a = -60; a <= 60; a += 30) {
+        const ra = a * Math.PI / 180;
+        ctx.beginPath();
+        ctx.moveTo(x, domeCtrY);
+        ctx.lineTo(x + Math.sin(ra) * 15 * s, domeCtrY - Math.cos(ra) * 15 * s);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = bldA;
+    }
+
+    // Gold cross/finial on dome (e > 0.62)
+    if (e > 0.62) {
+      const finA = ea(0.62, 0.74);
+      ctx.globalAlpha = bldA * finA;
+      box(x - 1 * s, domeTopY - 8 * s, 2 * s, 8 * s, gold);
+      box(x - 4 * s, domeTopY - 6 * s, 8 * s, 2 * s, gold);
+      ctx.globalAlpha = bldA;
+    }
+
+    // Tower + cornice ring (e > 0.70)
+    if (e > 0.70) {
+      const twA = ea(0.70, 0.82);
+      ctx.globalAlpha = bldA * twA;
+      const tw = 20 * s;
+      box(x - tw / 2, twTopY, tw, domeTopY - twTopY, stone);
+      box(x - tw / 2 - 3 * s, tcornY, tw + 6 * s, 4 * s, stoneD);
+      ctx.globalAlpha = bldA;
+    }
+
+    // Lancet window in tower (e > 0.76)
+    if (e > 0.76) {
+      const winA = ea(0.76, 0.88);
+      ctx.globalAlpha = bldA * winA;
+      const winY = twTopY + (tcornY - twTopY) * 0.5;
+      box(x - 4 * s, winY - 10 * s, 8 * s, 12 * s, stoneD);
+      ctx.beginPath();
+      ctx.arc(x, winY - 6 * s, 3.5 * s, Math.PI, 0);
+      ctx.rect(x - 3.5 * s, winY - 6 * s, 7 * s, 6 * s);
+      ctx.fillStyle = light < 0.35 ? di(C.WIN_LIT) : di(C.WIN_DAY); ctx.fill();
+      ctx.globalAlpha = bldA;
+    }
+
+    // Grand spire + gold tip (e > 0.84)
+    if (e > 0.84) {
+      const spA = ea(0.84, 0.96);
+      ctx.globalAlpha = bldA * spA;
+      poly([[x - 6 * s, tcornY], [x + 6 * s, tcornY], [x, spTipY]], stoneD);
+      disk(x, spTipY, 3 * s, gold);
+      ctx.globalAlpha = bldA;
+    }
+
+    // Iron fence + gate (e > 0.82) — drawn last so it overlaps steps
+    if (e > 0.82) {
+      const fenceA = ea(0.82, 0.94);
+      ctx.globalAlpha = bldA * fenceA;
+      const fw = 168 * s, fd = 38 * s, fy = y + 2 * s;
+      box(x - fw / 2, fy - fd, fw, 2 * s, iron);
+      box(x - fw / 2, fy - 2 * s, fw, 2 * s, iron);
+      const nPick = 28;
+      for (let i = 0; i < nPick; i++) {
+        const px = x - fw / 2 + (i + 0.5) * (fw / nPick);
+        if (Math.abs(px - x) < 12 * s) continue;
+        box(px - 1.2 * s, fy - fd - 3 * s, 2.4 * s, fd + 3 * s, iron);
+        poly([[px - 1.5 * s, fy - fd - 3 * s], [px + 1.5 * s, fy - fd - 3 * s], [px, fy - fd - 8 * s]], iron);
+      }
+      ctx.globalAlpha = bldA;
+    }
+
+    ctx.restore();
+  }
+}
+
+// ── KITCHEN GARDEN ────────────────────────────────────────────────────────────
+const GARDEN_BUILD_MS = 20000;   // 20s villager work to build fence
+const GARDEN_GROW_MS  = 1200000; // 20 real minutes to fully grow
+
+class KitchenGarden {
+  constructor(houseId, nx, ny) {
+    this.id = nextId++;
+    this.houseId = houseId;
+    this.nx = nx; this.ny = ny;
+    this.built = false; this.buildMs = 0;
+    this.growMs = 0;
+    this.rows = [
+      { type: 'carrot',  stolen: false },
+      { type: 'cabbage', stolen: false },
+      { type: 'turnip',  stolen: false },
+    ];
+  }
+  get sy()        { return worldY(this.ny - 0.068); } // sort at back fence so villagers always draw on top
+  get growFrac()  { return Math.min(1, this.growMs / GARDEN_GROW_MS); }
+  get grown()     { return this.growMs >= GARDEN_GROW_MS; }
+  get hasRipeVeg(){ return this.grown && this.rows.some(r => !r.stolen); }
+
+  update(dt) {
+    if (this.built) this.growMs += dt;
+  }
+
+  harvest() {
+    this.rows.forEach(r => r.stolen = false);
+    this.growMs = 0;
+  }
+
+  draw() {
+    if (!this.built) return;
+    const t = tod(), light = ambientLight(t);
+    const s = H / 600;
+    const di = col => dimHex(col, light);
+    const x = this.nx * W, y = this.sy;
+    const gw = 22 * s, gh = 26 * s;
+    const gf = this.growFrac;
+
+    // Soil rows (3 rows, back to front, evenly spaced)
+    const soilCol = di('#5a3a18');
+    for (let ri = 0; ri < 3; ri++) {
+      const ry = y - gh + (ri + 0.5) * (gh / 3);
+      box(x - gw + 2 * s, ry - 2 * s, (gw - 2 * s) * 2, 4 * s, soilCol);
+    }
+
+    // Fence
+    const fc = di('#deded0');
+    // Top rail
+    box(x - gw, y - gh - s, gw * 2, 2 * s, fc);
+    // Bottom rail with gate gap (10*s opening in centre)
+    box(x - gw, y - s, gw - 5 * s, 2 * s, fc);
+    box(x + 5 * s, y - s, gw - 5 * s, 2 * s, fc);
+    // Left and right rails
+    box(x - gw - s, y - gh, 2 * s, gh, fc);
+    box(x + gw - s, y - gh, 2 * s, gh, fc);
+    // 6 picket posts evenly spaced straddling the top rail
+    for (let i = 0; i < 6; i++) {
+      const px = x - gw + i * (gw * 2 / 5);
+      box(px - s, y - gh - 5 * s, 2 * s, 7 * s, fc);
+    }
+
+    // Vegetables (4 per row, scaled by sqrt(growFrac))
+    const gs = Math.sqrt(gf);
+    for (let ri = 0; ri < 3; ri++) {
+      if (this.rows[ri].stolen) continue;
+      const ry = y - gh + (ri + 0.5) * (gh / 3);
+      const type = this.rows[ri].type;
+      for (let ci = 0; ci < 4; ci++) {
+        const vx = x - gw + (ci + 0.5) * (gw * 2 / 4);
+        if (type === 'carrot') {
+          poly([[vx, ry - 8 * gs * s], [vx - 3 * gs * s, ry], [vx + 3 * gs * s, ry]], di('#e87020'));
+          if (gs > 0.05) {
+            ctx.strokeStyle = di('#508020'); ctx.lineWidth = 1.5 * gs * s;
+            ctx.beginPath(); ctx.moveTo(vx, ry - 8 * gs * s); ctx.lineTo(vx - 2 * gs * s, ry - 14 * gs * s); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(vx, ry - 8 * gs * s); ctx.lineTo(vx + 2 * gs * s, ry - 14 * gs * s); ctx.stroke();
+          }
+        } else if (type === 'cabbage') {
+          if (gs > 0) {
+            ctx.beginPath(); ctx.ellipse(vx, ry - 4 * gs * s, 5 * gs * s, 3.5 * gs * s, 0, 0, Math.PI * 2);
+            ctx.fillStyle = di('#70a030'); ctx.fill();
+          }
+        } else { // turnip
+          disk(vx, ry - 4 * gs * s, 4 * gs * s, di('#e8e0c0'));
+          cap(vx, ry - 4 * gs * s, 4 * gs * s, di('#8060a0'));
+          if (gs > 0.05) {
+            ctx.strokeStyle = di('#508020'); ctx.lineWidth = 1.5 * gs * s;
+            ctx.beginPath(); ctx.moveTo(vx, ry - 8 * gs * s); ctx.lineTo(vx - 2 * gs * s, ry - 13 * gs * s); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(vx, ry - 8 * gs * s); ctx.lineTo(vx + 2 * gs * s, ry - 13 * gs * s); ctx.stroke();
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── RUINS ──
+class Ruin {
+  constructor(nx, ny, widthScale = 1) {
+    this.nx = nx; this.ny = ny; this.widthScale = widthScale;
+  }
+  get sy() { return worldY(this.ny); }
+  draw() {
+    const s = H / 600;
+    const cx = this.nx * W, cy = worldY(this.ny);
+    const hw = 28 * this.widthScale * s;
+    const t = ambientLight(tod());
+    // Charred rubble — low pile of dark polygons
+    ctx.globalAlpha = 1;
+    // Base ash layer
+    poly([cx - hw, cy, cx + hw, cy, cx + hw * 0.8, cy - 6 * s, cx - hw * 0.8, cy - 6 * s], dimHex('#2a2520', t));
+    // Charred timber chunks
+    const seed = this.nx * 1000 | 0;
+    for (let i = 0; i < 5; i++) {
+      const bx = cx + (srand(seed, i * 3) - 0.5) * hw * 1.4;
+      const by = cy - srand(seed, i * 3 + 1) * 8 * s;
+      const bw = (4 + srand(seed, i * 3 + 2) * 8) * s;
+      box(bx - bw / 2, by - s, bw, 2 * s + 1, dimHex('#1a1208', t));
+    }
+    // Chimney stump
+    box(cx + hw * 0.3, cy - 14 * s, 5 * s, 14 * s, dimHex('#5a4030', t));
+    // Ash / soot overlay
+    poly([cx - hw * 0.9, cy + 1, cx + hw * 0.9, cy + 1, cx + hw * 0.7, cy - 4 * s, cx - hw * 0.7, cy - 4 * s], dimHex('#3a3028', t * 0.6));
+  }
+}
+
+// ── FARM ANIMALS ──────────────────────────────────────────────────────────────
+class Chicken {
+  constructor(houseId, nx, ny, seed) {
+    this.houseId = houseId;
+    this.nx = nx; this.ny = ny;
+    this.seed = seed;
+    this.tnx = nx; this.tny = ny;
+    this.stateMs = 800 + Math.abs(srand(seed, 0)) * 1200;
+    this.state = 'peck'; // 'peck' | 'walk'
+    this.animT = seed * 3.7;
+    this.facing = 1;
+  }
+  get sy() { return worldY(this.ny); }
+
+  update(dt) {
+    const light = ambientLight(tod());
+    if (light < 0.25) return; // stay inside at night
+    this.animT += dt;
+    this.stateMs -= dt;
+    if (this.stateMs <= 0) {
+      if (this.state === 'peck') {
+        // pick a new spot near the house (±0.07 nx, ±0.05 ny)
+        const h = houses.find(h => h.id === this.houseId);
+        const hx = h ? h.nx : this.nx, hy = h ? h.ny : this.ny;
+        this.tnx = Math.max(0.02, Math.min(0.98, hx + (srand(this.seed, this.animT|0) * 0.07)));
+        this.tny = Math.max(0.05, Math.min(0.95, hy + (srand(this.seed+1, this.animT|0) * 0.05)));
+        this.state = 'walk';
+        this.stateMs = 1200 + Math.abs(srand(this.seed+2, this.animT|0)) * 1500;
+      } else {
+        this.state = 'peck';
+        this.stateMs = 700 + Math.abs(srand(this.seed+3, this.animT|0)) * 1000;
+      }
+    }
+    if (this.state === 'walk') {
+      const dx = this.tnx - this.nx, dy = this.tny - this.ny;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0.003) {
+        const speed = 0.000055;
+        const move = Math.min(dist, speed * dt);
+        this.nx += (dx/dist)*move;
+        this.ny += (dy/dist)*move;
+        this.facing = dx < 0 ? -1 : 1;
+      } else {
+        this.state = 'peck';
+        this.stateMs = 700 + Math.abs(srand(this.seed+3, this.animT|0)) * 1000;
+      }
+    }
+  }
+
+  draw() {
+    const light = ambientLight(tod());
+    if (light < 0.25) return;
+    const di = c => dimHex(c, light);
+    const s = H / 600 * 0.28;
+    const x = this.nx * W, y = worldY(this.ny);
+    const pecking = this.state === 'peck';
+    // Head bob when pecking
+    const headBob = pecking ? Math.sin(this.animT * 0.008) * 3 * s : 0;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(this.facing, 1);
+    // Body — oval
+    ctx.beginPath();
+    ctx.ellipse(0, -5*s, 4.5*s, 3.5*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = di('#e8d870'); ctx.fill();
+    // Wing highlights
+    ctx.beginPath();
+    ctx.ellipse(-0.5*s, -5.5*s, 3*s, 2*s, -0.2, 0, Math.PI*2);
+    ctx.fillStyle = di('#d4c440'); ctx.fill();
+    // Tail feathers
+    poly([[3*s, -5*s],[5.5*s, -8*s],[4.5*s, -4*s],[3.5*s, -3*s]], di('#c8b830'));
+    // Neck
+    poly([[-1.5*s, -7.5*s],[1*s, -7.5*s],[1.5*s, -10*s + headBob],[-1*s, -10*s + headBob]], di('#e8d870'));
+    // Head
+    disk(0, -11*s + headBob, 2.8*s, di('#e8d870'));
+    // Comb
+    poly([[0, -13.5*s + headBob],[-1.2*s, -14.5*s + headBob],[0.3*s, -15*s + headBob],[1.2*s, -14*s + headBob]], di('#d03030'));
+    // Beak
+    poly([[1.5*s, -11.2*s + headBob],[3.5*s, -10.8*s + headBob],[2*s, -10*s + headBob]], di('#e8a020'));
+    // Eye
+    disk(0.8*s, -11.8*s + headBob, 0.8*s, di('#202020'));
+    // Legs
+    const legSwing = this.state === 'walk' ? Math.sin(this.animT * 0.012) * 2 * s : 0;
+    ctx.strokeStyle = di('#e8a020'); ctx.lineWidth = 1.2*s;
+    ctx.beginPath(); ctx.moveTo(-1.5*s, -2.5*s); ctx.lineTo(-1.5*s + legSwing, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(1*s, -2.5*s); ctx.lineTo(1*s - legSwing, 0); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+class Pig {
+  constructor(houseId, nx, ny, seed) {
+    this.houseId = houseId;
+    this.nx = nx; this.ny = ny;
+    this.seed = seed;
+    this.tnx = nx; this.tny = ny;
+    this.stateMs = 2000 + Math.abs(srand(seed, 0)) * 2000;
+    this.state = 'root'; // 'root' | 'walk'
+    this.animT = seed * 2.1;
+    this.facing = 1;
+  }
+  get sy() { return worldY(this.ny); }
+
+  update(dt) {
+    const light = ambientLight(tod());
+    if (light < 0.25) return;
+    this.animT += dt;
+    this.stateMs -= dt;
+    if (this.stateMs <= 0) {
+      if (this.state === 'root') {
+        const h = houses.find(h => h.id === this.houseId);
+        const hx = h ? h.nx : this.nx, hy = h ? h.ny : this.ny;
+        this.tnx = Math.max(0.02, Math.min(0.98, hx + srand(this.seed, this.animT|0) * 0.09));
+        this.tny = Math.max(0.05, Math.min(0.95, hy + srand(this.seed+1, this.animT|0) * 0.06));
+        this.state = 'walk';
+        this.stateMs = 2500 + Math.abs(srand(this.seed+2, this.animT|0)) * 2000;
+      } else {
+        this.state = 'root';
+        this.stateMs = 1500 + Math.abs(srand(this.seed+3, this.animT|0)) * 2000;
+      }
+    }
+    if (this.state === 'walk') {
+      const dx = this.tnx - this.nx, dy = this.tny - this.ny;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0.004) {
+        const speed = 0.000030;
+        const move = Math.min(dist, speed * dt);
+        this.nx += (dx/dist)*move;
+        this.ny += (dy/dist)*move;
+        this.facing = dx < 0 ? -1 : 1;
+      } else {
+        this.state = 'root';
+        this.stateMs = 1500 + Math.abs(srand(this.seed+3, this.animT|0)) * 2000;
+      }
+    }
+  }
+
+  draw() {
+    const light = ambientLight(tod());
+    if (light < 0.25) return;
+    const di = c => dimHex(c, light);
+    const s = H / 600 * 0.38;
+    const x = this.nx * W, y = worldY(this.ny);
+    const walking = this.state === 'walk';
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(this.facing, 1);
+    const pink = di('#f0a0b0');
+    const dpink = di('#d07888');
+    // Body
+    ctx.beginPath();
+    ctx.ellipse(0, -4*s, 7*s, 4.5*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = pink; ctx.fill();
+    // Head
+    disk(-6*s, -5*s, 4*s, pink);
+    // Snout
+    disk(-9.5*s, -4.5*s, 2.5*s, dpink);
+    // Nostrils
+    disk(-10.2*s, -4.2*s, 0.6*s, di('#b05060'));
+    disk(-9*s,   -4.2*s, 0.6*s, di('#b05060'));
+    // Eye
+    disk(-5.5*s, -6.5*s, 0.8*s, di('#303030'));
+    // Ear
+    poly([[-4.5*s,-8.5*s],[-6.5*s,-10*s],[-3*s,-9.5*s]], dpink);
+    // Curly tail
+    ctx.strokeStyle = dpink; ctx.lineWidth = 1.5*s; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(7*s, -5*s, 2*s, 0.3, Math.PI * 1.8);
+    ctx.stroke();
+    // Legs with waddle
+    const legSwing = walking ? Math.sin(this.animT * 0.009) * 1.5 * s : 0;
+    ctx.strokeStyle = pink; ctx.lineWidth = 2.5*s; ctx.lineCap = 'round';
+    [[-4*s, 0],[4*s, 0]].forEach(([lx], i) => {
+      const swing = i % 2 === 0 ? legSwing : -legSwing;
+      ctx.beginPath(); ctx.moveTo(lx, -1*s); ctx.lineTo(lx + swing, 2*s); ctx.stroke();
+    });
+    ctx.restore();
+  }
+}
+
+class Dog {
+  constructor(houseId, nx, ny, seed) {
+    this.houseId = houseId;
+    this.nx = nx; this.ny = ny;
+    this.seed = seed;
+    this.tnx = nx; this.tny = ny;
+    this.stateMs = 1500 + Math.abs(srand(seed, 0)) * 2000;
+    this.state = 'sit'; // 'sit' | 'walk' | 'doorstep'
+    this.animT = seed * 1.9;
+    this.facing = 1;
+    // Seeded coat: golden or brown
+    this.coat = Math.abs(srand(seed, 99)) > 0.5 ? '#c88030' : '#7a4820';
+  }
+  get sy() { return worldY(this.ny); }
+
+  update(dt) {
+    const light = ambientLight(tod());
+    if (light < 0.25) return;
+    this.animT += dt;
+    this.stateMs -= dt;
+    if (this.stateMs <= 0) {
+      const h = houses.find(h => h.id === this.houseId);
+      // Occasionally trot to doorstep
+      const r = Math.abs(srand(this.seed+5, this.animT|0));
+      if (h && r > 0.8 && this.state !== 'doorstep') {
+        this.tnx = h.nx; this.tny = bldgDoorNy(h.ny);
+        this.state = 'doorstep';
+        this.stateMs = 3000 + r * 3000;
+      } else if (this.state === 'sit' || this.state === 'doorstep') {
+        const hx = h ? h.nx : this.nx, hy = h ? h.ny : this.ny;
+        this.tnx = Math.max(0.02, Math.min(0.98, hx + srand(this.seed, this.animT|0) * 0.10));
+        this.tny = Math.max(0.05, Math.min(0.95, hy + srand(this.seed+1, this.animT|0) * 0.07));
+        this.state = 'walk';
+        this.stateMs = 1800 + Math.abs(srand(this.seed+2, this.animT|0)) * 2000;
+      } else {
+        this.state = 'sit';
+        this.stateMs = 1200 + Math.abs(srand(this.seed+3, this.animT|0)) * 1500;
+      }
+    }
+    if (this.state === 'walk' || this.state === 'doorstep') {
+      const dx = this.tnx - this.nx, dy = this.tny - this.ny;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0.004) {
+        const speed = 0.000080;
+        const move = Math.min(dist, speed * dt);
+        this.nx += (dx/dist)*move;
+        this.ny += (dy/dist)*move;
+        this.facing = dx < 0 ? -1 : 1;
+      } else {
+        this.state = 'sit';
+        this.stateMs = 1200 + Math.abs(srand(this.seed+3, this.animT|0)) * 1500;
+      }
+    }
+  }
+
+  draw() {
+    const light = ambientLight(tod());
+    if (light < 0.25) return;
+    const di = c => dimHex(c, light);
+    const s = H / 600 * 0.35;
+    const x = this.nx * W, y = worldY(this.ny);
+    const walking = this.state === 'walk' || this.state === 'doorstep';
+    const coat = di(this.coat);
+    const dark = di(this.coat === '#c88030' ? '#8a4c10' : '#3a1c08');
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(this.facing, 1);
+    // Body
+    ctx.beginPath();
+    ctx.ellipse(0, -5*s, 6*s, 4*s, 0, 0, Math.PI*2);
+    ctx.fillStyle = coat; ctx.fill();
+    // Head
+    disk(-5.5*s, -8*s, 3.5*s, coat);
+    // Muzzle
+    ctx.beginPath();
+    ctx.ellipse(-7.5*s, -7*s, 2.5*s, 1.8*s, 0.3, 0, Math.PI*2);
+    ctx.fillStyle = di(this.coat === '#c88030' ? '#e8b060' : '#5a3018'); ctx.fill();
+    // Nose
+    disk(-9*s, -7*s, 0.9*s, di('#202020'));
+    // Eye
+    disk(-4.5*s, -9*s, 0.8*s, di('#202020'));
+    // Ear — floppy
+    poly([[-3.5*s,-10.5*s],[-2*s,-7*s],[-5.5*s,-6.5*s]], dark);
+    // Tail — wagging
+    const wag = Math.sin(this.animT * (walking ? 0.016 : 0.010)) * 3 * s;
+    poly([[6*s,-7*s],[9*s,-10*s + wag],[8*s,-6.5*s]], coat);
+    // Legs
+    const legSwing = walking ? Math.sin(this.animT * 0.013) * 2 * s : 0;
+    ctx.strokeStyle = coat; ctx.lineWidth = 2.2*s; ctx.lineCap = 'round';
+    [[-3.5*s],[2.5*s]].forEach(([lx], i) => {
+      const swing = i % 2 === 0 ? legSwing : -legSwing;
+      ctx.beginPath(); ctx.moveTo(lx, -2*s); ctx.lineTo(lx + swing, 1.5*s); ctx.stroke();
+    });
+    ctx.restore();
+  }
+}
+
+function spawnAnimalsForHouse(h) {
+  const seed = h.id * 37;
+  const baseNx = h.nx, baseNy = h.ny + 0.04;
+  // 3 chickens
+  for (let i = 0; i < 3; i++) {
+    const cx = baseNx + (srand(seed + i*7, 0) * 0.06);
+    const cy = baseNy + (srand(seed + i*7, 1) * 0.04);
+    farmAnimals.push(new Chicken(h.id, cx, cy, seed + i*7));
+  }
+  // 2 pigs
+  for (let i = 0; i < 2; i++) {
+    const cx = baseNx + (srand(seed + 100 + i*11, 0) * 0.06);
+    const cy = baseNy + (srand(seed + 100 + i*11, 1) * 0.04);
+    farmAnimals.push(new Pig(h.id, cx, cy, seed + 100 + i*11));
+  }
+  // 1 dog
+  farmAnimals.push(new Dog(h.id, baseNx + srand(seed+200, 0)*0.05, baseNy + srand(seed+200, 1)*0.04, seed+200));
+  h.animalsGiven = true;
+}
+
+function checkFarmAnimals() {
+  for (const h of houses) {
+    if (h.animalsGiven) continue;
+    if (h.completion < 1) continue;
+    // Need 3+ adult/old residents
+    const residents = villagers.filter(v => v.homeId === h.id && (v.age === 'adult' || v.age === 'old'));
+    if (residents.length < 3) continue;
+    // Need a built kitchen garden for this house
+    const hasGarden = kitchenGardens.some(g => g.houseId === h.id && g.built);
+    if (!hasGarden) continue;
+    spawnAnimalsForHouse(h);
+  }
+}
+
+// ── POND & DUCKS ──────────────────────────────────────────────────────────────
+function pickPondPos() {
+  // Grid search for a spot clear of buildings and edges.
+  let best = null, bestScore = -Infinity;
+  for (let nx = 0.10; nx <= 0.88; nx += 0.04) {
+    for (let ny = 0.22; ny <= 0.78; ny += 0.04) {
+      const minHouse  = houses.reduce((m, h) => Math.min(m, Math.hypot(h.nx-nx, h.ny-ny)), Infinity);
+      const minChurch = church ? Math.hypot(church.nx-nx, church.ny-ny) : Infinity;
+      const minMaus   = mausoleum ? Math.hypot(mausoleum.nx-nx, mausoleum.ny-ny) : Infinity;
+      const minDist   = Math.min(minHouse, minChurch, minMaus);
+      if (minDist < 0.18) continue;
+      // Prefer central-ish ny (not too far back or front) with some randomness
+      const score = minDist + (Math.random() * 0.08);
+      if (score > bestScore) { bestScore = score; best = { nx, ny }; }
+    }
+  }
+  return best || { nx: 0.25, ny: 0.50 };
+}
+
+function spawnPond() {
+  const pos = pickPondPos();
+  pond = { nx: pos.nx, ny: pos.ny, rx: 0.068, ry: 0.028 };
+  ducks = [];
+  for (let i = 0; i < 4; i++) ducks.push(new Duck(i));
+}
+
+function checkPond() {
+  if (pond) return;
+  if (kitchenGardens.filter(g => g.built).length >= 5) spawnPond();
+}
+
+class Duck {
+  constructor(seed) {
+    this.seed   = seed;
+    this.isMale = seed % 2 === 0;
+    // Start at a random spot inside the pond.
+    this.nx     = pond.nx + srand(seed, 10) * pond.rx * 0.75;
+    this.ny     = pond.ny + srand(seed, 11) * pond.ry * 0.75;
+    this.tnx    = this.nx;
+    this.tny    = this.ny;
+    this.state  = 'swim'; // 'swim' | 'preen' | 'waddle'
+    this.stateMs = 2000 + Math.abs(srand(seed, 12)) * 4000;
+    this.facing = srand(seed, 13) > 0 ? 1 : -1;
+    this.animT  = seed * 3.1;
+  }
+  get sy() { return worldY(this.ny); }
+
+  update(dt) {
+    this.animT  += dt;
+    this.stateMs -= dt;
+    if (this.stateMs <= 0) this._pickState();
+    const dx = this.tnx - this.nx, dy = this.tny - this.ny;
+    const dist = Math.hypot(dx, dy);
+    const speed = this.state === 'waddle' ? 0.000045 : 0.000018;
+    if (dist > 0.003 && this.state !== 'preen') {
+      const move = Math.min(dist, speed * dt);
+      this.nx += (dx / dist) * move;
+      this.ny += (dy / dist) * move;
+      this.facing = dx < 0 ? -1 : 1;
+    }
+  }
+
+  _pickState() {
+    const r = Math.abs(srand(this.seed, this.animT | 0));
+    if (r < 0.60) {
+      // Swim to a new spot inside the pond.
+      this.state = 'swim';
+      this.tnx   = pond.nx + srand(this.seed + 1, this.animT | 0) * pond.rx * 0.80;
+      this.tny   = pond.ny + srand(this.seed + 2, this.animT | 0) * pond.ry * 0.80;
+      this.stateMs = 3000 + Math.abs(srand(this.seed, this.animT + 1 | 0)) * 5000;
+    } else if (r < 0.82) {
+      // Preen on the bank — just outside the pond edge.
+      this.state = 'preen';
+      const ang  = srand(this.seed + 3, this.animT | 0) * Math.PI;
+      this.tnx   = pond.nx + Math.cos(ang) * (pond.rx + 0.012 + Math.abs(srand(this.seed + 4, this.animT | 0)) * 0.02);
+      this.tny   = pond.ny + Math.sin(ang) * (pond.ry + 0.010 + Math.abs(srand(this.seed + 5, this.animT | 0)) * 0.015);
+      this.stateMs = 2500 + Math.abs(srand(this.seed + 6, this.animT | 0)) * 3500;
+    } else {
+      // Short waddle near the bank.
+      this.state = 'waddle';
+      this.tnx   = pond.nx + srand(this.seed + 7, this.animT | 0) * (pond.rx + 0.035);
+      this.tny   = pond.ny + srand(this.seed + 8, this.animT | 0) * (pond.ry + 0.030);
+      this.stateMs = 2000 + Math.abs(srand(this.seed + 9, this.animT | 0)) * 3000;
+    }
+    // Clamp waddle/preen targets to ground bounds.
+    this.tnx = Math.max(0.03, Math.min(0.97, this.tnx));
+    this.tny = Math.max(0.05, Math.min(0.95, this.tny));
+  }
+
+  draw() {
+    const light = ambientLight(tod());
+    const di = c => dimHex(c, light);
+    const s  = H / 600 * 0.24;
+    const x  = this.nx * W, y = worldY(this.ny);
+    const onWater = this.state === 'swim' || this.state === 'preen';
+    // Body sits lower in the water when swimming.
+    const bodyY = onWater ? -2.5 * s : -5 * s;
+    const bob   = Math.sin(this.animT * 0.0028) * 1.0 * s;
+    const bodyCol = di(this.isMale ? '#f0ece0' : '#c8a060');
+    const headCol = di(this.isMale ? '#1a5828' : '#a07840');
+    const billCol = di('#e09018');
+
+    ctx.save();
+    ctx.translate(x, y + bob);
+    ctx.scale(this.facing, 1);
+
+    // Body
+    ctx.beginPath();
+    ctx.ellipse(0, bodyY, 5.5 * s, 3 * s, 0, 0, Math.PI * 2);
+    ctx.fillStyle = bodyCol; ctx.fill();
+
+    // Tail — upswept triangle at the rear.
+    poly([[3.5*s, bodyY-1*s], [6.5*s, bodyY-5*s], [5*s, bodyY+1.5*s]], di(this.isMale ? '#d8d4c8' : '#a88048'));
+
+    // Neck
+    poly([[-2*s, bodyY-2*s], [0*s, bodyY-2*s], [0*s, bodyY-5*s], [-2.5*s, bodyY-4.5*s]], bodyCol);
+
+    // Head
+    disk(-1.5 * s, bodyY - 6 * s, 2.8 * s, headCol);
+
+    // Bill — flat orange wedge.
+    poly([[-3*s, bodyY-5.8*s], [-6*s, bodyY-5.4*s], [-5*s, bodyY-4.5*s], [-2.5*s, bodyY-4.8*s]], billCol);
+
+    // Eye
+    disk(-1*s, bodyY - 7 * s, 0.7 * s, di('#101010'));
+    // White eye-ring for male
+    if (this.isMale) disk(-1*s, bodyY - 7 * s, 1.1 * s, di('#e0e8d0'));
+
+    // Feet (only when on bank).
+    if (!onWater) {
+      const legSwing = this.state === 'waddle' ? Math.sin(this.animT * 0.011) * 1.5 * s : 0;
+      ctx.strokeStyle = billCol; ctx.lineWidth = 1.3 * s; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-1*s, bodyY + 3*s); ctx.lineTo(-1*s + legSwing, bodyY + 5*s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(1.5*s, bodyY + 3*s); ctx.lineTo(1.5*s - legSwing, bodyY + 5*s); ctx.stroke();
+    }
+
+    // Ripple ring when swimming.
+    if (this.state === 'swim') {
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = di('#70a8c8'); ctx.lineWidth = 1 * s;
+      ctx.beginPath();
+      ctx.ellipse(0, bodyY + 3 * s, 7 * s, 2.2 * s, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+}
+
+function drawPond() {
+  const light = ambientLight(tod());
+  const di = c => dimHex(c, light);
+  const x  = pond.nx * W;
+  const y  = worldY(pond.ny);
+  const rx = pond.rx * W;
+  const ry = pond.ry * H * (1 - GROUND_TOP);
+
+  // Outer dark rim
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx + 3, ry + 2.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = di('#2a5060'); ctx.fill();
+
+  // Main water body
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = di('#4880a8'); ctx.fill();
+
+  // Lighter shimmer patch (off-centre)
+  ctx.beginPath();
+  ctx.ellipse(x - rx * 0.15, y - ry * 0.25, rx * 0.55, ry * 0.45, 0, 0, Math.PI * 2);
+  ctx.fillStyle = di('#6898c0'); ctx.fill();
+
+  // Reeds — a few thin dark spikes along the back edge
+  const reedCol = di('#3a5828');
+  for (let i = 0; i < 5; i++) {
+    const rx2 = rx * (0.3 + i * 0.15);
+    const ry2 = -ry * (0.85 + (i % 2) * 0.08);
+    const h   = ry * (0.55 + (i % 3) * 0.20);
+    ctx.strokeStyle = reedCol; ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.moveTo(x + rx2, y + ry2); ctx.lineTo(x + rx2, y + ry2 - h); ctx.stroke();
+    // Small oval reed-head
+    disk(x + rx2, y + ry2 - h, 2.2, di('#5a7038'));
+  }
+}
+
+// ── SOUND ─────────────────────────────────────────────────────────────────────
+let audioCtx = null;
+let soundEnabled = true;
+function playChurchBell() {
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ring = offset => {
+      const now = audioCtx.currentTime + offset;
+      // Bell partials: fundamental + tierce (min 3rd) + quint (5th) + octave
+      [[1.0, 0.022],[1.19, 0.012],[1.50, 0.014],[2.0, 0.016],[3.0, 0.007]].forEach(([ratio, pk]) => {
+        const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.type = 'sine'; osc.frequency.value = 280 * ratio;
+        gain.gain.setValueAtTime(pk, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 3.8);
+        osc.start(now); osc.stop(now + 4.0);
+      });
+    };
+    ring(0); ring(1.4); ring(2.8);
+  } catch(_) {}
+}
+
+function playGrow() {
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(660, audioCtx.currentTime+0.25);
+    gain.gain.setValueAtTime(0.06, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime+0.55);
+    osc.start(audioCtx.currentTime); osc.stop(audioCtx.currentTime+0.55);
+  } catch(_) {}
+}
+
+function playWolfGuitar() {
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    const base = [82.4, 110, 146.8][Math.floor(Math.random() * 3)]; // E2 / A2 / D3
+    [1, 2, 3, 4].forEach(h => {
+      const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = base * h;
+      gain.gain.setValueAtTime(0.030 / h, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.4 / Math.sqrt(h));
+      osc.start(now); osc.stop(now + 2.0);
+    });
+  } catch (_) {}
+}
+
+function playGhostMoan() {
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    // Two slightly detuned sines with LFO vibrato; pitch descends then rises (wooOOOooo)
+    [0, 4].forEach(detune => {
+      const osc  = audioCtx.createOscillator();
+      const lfo  = audioCtx.createOscillator();
+      const lfoG = audioCtx.createGain();
+      const gain = audioCtx.createGain();
+      lfo.frequency.value = 2.4;
+      lfoG.gain.value = 14;
+      lfo.connect(lfoG); lfoG.connect(osc.frequency);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(190 + detune, now);
+      osc.frequency.linearRampToValueAtTime(95 + detune, now + 2.0);
+      osc.frequency.linearRampToValueAtTime(130 + detune, now + 3.4);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.022, now + 0.8);
+      gain.gain.setValueAtTime(0.022, now + 2.4);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 4.0);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      lfo.start(now); lfo.stop(now + 4.0);
+      osc.start(now); osc.stop(now + 4.0);
+    });
+  } catch (_) {}
+}
+
+function playHeavenlyChorus() {
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    // C major + 9th chord: C4 E4 G4 C5 E5
+    [261.6, 329.6, 392.0, 523.3, 659.3].forEach((freq, i) => {
+      const osc  = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const lfo  = audioCtx.createOscillator();
+      const lfoG = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now);
+      lfo.frequency.setValueAtTime(4.8, now);
+      lfoG.gain.setValueAtTime(1.2, now);
+      lfo.connect(lfoG); lfoG.connect(osc.frequency);
+      lfo.start(now); lfo.stop(now + 5.5);
+      const vol = 0.038 / (1 + i * 0.25);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(vol, now + 1.0);
+      gain.gain.setValueAtTime(vol, now + 3.5);
+      gain.gain.linearRampToValueAtTime(0, now + 5.5);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(now); osc.stop(now + 5.5);
+    });
+  } catch(e) {}
+}
+
+// ── GAME STATE ────────────────────────────────────────────────────────────────
+let villagers    = [];
+let houses       = [];
+let church       = null;
+let birds        = [];
+const dragon     = new Dragon();
+const wizard     = new Wizard();
+const wolf       = new Wolf();
+const ferret     = new Ferret();
+const bear       = new Bear();
+const ghost      = new Ghost();
+let groundBirds  = [];
+let rabbits      = [];
+let graveyard       = null; // { nx, ny, crosses:[{nx,ny},...], totalDead }
+let mausoleum       = null;
+let angels          = [];
+let priestSequence  = null;  // { phase, ms, nx, ny, chorusMs }
+let priestTomb      = null;  // { nx, ny } — the special tomb
+let priestRespawnPending = false;
+let kitchenGardens  = [];
+let farmAnimals     = [];
+let pond            = null;  // { nx, ny, rx, ry } — single pond instance
+let ducks           = [];
+let ruins           = [];    // charred ground-level remains of burned houses
+let mobTargetId     = null;  // house id currently targeted by the mob, or null
+let nextMobCheckMs  = 25000; // countdown before first reachability check
+let leaverCount     = 0;
+let lastEmigrateDay = -1;
+let arrivalCount = 0;
+let nextArrivalMs = 800;
+
+// ── ARRIVALS & SPAWNING ──────────────────────────────────────────────────────
+function scheduleArrival() {
+  nextArrivalMs = gameTime + (arrivalCount < FIRST_BATCH
+    ? 12000 + Math.random()*15000
+    : 70000 + Math.random()*110000);
+}
+
+function spawnVillager() {
+  const fromLeft = Math.random() < 0.5;
+  villagers.push(new Villager({
+    nx: fromLeft ? -0.02 : 1.02,
+    ny: 0.25 + Math.random()*0.5,
+    gender: arrivalCount % 2 === 0 ? 'm' : 'f',
+    age: 'adult', state: 'arrive',
+    tnx: 0.12 + Math.random()*0.76,
+    tny: 0.15 + Math.random()*0.70,
+  }));
+  arrivalCount++;
+  scheduleArrival();
+}
+
+function spawnChild(parent) {
+  const child = new Villager({
+    nx: parent.nx + (Math.random()-0.5)*0.04,
+    ny: parent.ny + (Math.random()-0.5)*0.04,
+    gender: Math.random() < 0.5 ? 'm' : 'f',
+    age: 'child', state: 'wander',
+    tnx: parent.nx, tny: parent.ny,
+    homeId: parent.homeId, ageMs: 0,
+  });
+  villagers.push(child);
+  playGrow();
+  // Child holds parent's hand on first emerging — most of the time
+  if (Math.random() < 0.80 && parent.handPartnerId === null) {
+    child.handPartnerId  = parent.id;
+    parent.handPartnerId = child.id;
+    const dur = 18000 + Math.random() * 22000;
+    child.holdHandMs = dur; parent.holdHandMs = dur;
+  }
+}
+
+function assignHome(v) {
+  if (v.homeId !== null) return;
+  const free = houses.find(h => villagers.filter(vv => vv.homeId === h.id && (vv.age === 'adult' || vv.age === 'old')).length < h.capacity);
+  if (free) {
+    v.homeId = free.id;
+  } else {
+    let nx, ny;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      nx = 0.08 + Math.random() * 0.84;
+      ny = 0.10 + Math.random() * 0.80;
+      if (!graveyard || Math.hypot(nx - graveyard.nx, ny - graveyard.ny) >= 0.18) {
+        // also skip positions too close to a ruin
+        if (ruins.some(r => Math.abs(r.nx - nx) < 0.13 && Math.abs(r.ny - ny) < 0.06)) continue;
+        break;
+      }
+    }
+    const h  = new House(nx, ny);
+    houses.push(h);
+    v.homeId = h.id; v.state = 'build'; v.stateMs = 16000 + Math.random()*20000;
+    v.tnx = nx; v.tny = ny;
+  }
+}
+
+function updateArrivals() {
+  if (gameTime >= nextArrivalMs) {
+    // Cap arrivals: don't invite newcomers when already near the adult target.
+    const adultCount = villagers.filter(v =>
+      v.age === 'adult' && !v.isPriest &&
+      v.state !== 'dead' && v.state !== 'buried').length;
+    if (adultCount < 38) spawnVillager(); else scheduleArrival();
+  }
+  const adults = villagers.filter(v => v.age === 'adult' && !v.isPriest);
+  if (adults.length >= CHURCH_POP && !church && !villagers.some(v => v.isPriest)) {
+    church = new Church(0.82, 0.35);
+    villagers.push(new Villager({
+      gender: 'm', age: 'adult', isPriest: true,
+      nx: 0.5, ny: 0.5, state: 'build_church', stateMs: 25000,
+      tnx: church.nx, tny: church.ny,
+    }));
+  }
+  // Respawn priest next morning after angel sequence completes
+  if (priestRespawnPending && !villagers.some(v => v.isPriest) && !priestSequence) {
+    const t = tod();
+    if (t > 0.25 && t < 0.40) {
+      priestRespawnPending = false;
+      villagers.push(new Villager({
+        gender: 'm', age: 'adult', isPriest: true,
+        nx: -0.05, ny: 0.5, state: 'arrive', stateMs: 8000,
+        tnx: church ? church.nx : 0.5, tny: church ? church.ny : 0.5,
+      }));
+    }
+  }
+}
+
+function checkEmigration() {
+  const t = tod();
+  if (t < 0.27 || t > 0.52) return;        // morning window only
+  const d = dayNum();
+  if (d === lastEmigrateDay) return;        // one check per day
+  lastEmigrateDay = d;
+
+  // Measure pressure using ALL non-priest adults (awake or asleep)
+  const totalAdults = villagers.filter(v =>
+    v.age === 'adult' && !v.isPriest &&
+    v.state !== 'dead' && v.state !== 'buried').length;
+  const excess = totalAdults - 35;          // target ceiling ≈ 40
+  if (excess <= 0) return;
+
+  // Per-excess-adult probability: 0% at 35, 90% at 45+
+  const p = Math.min(0.90, excess / 10 * 0.90);
+
+  // Eligible lead adults: wandering, unattached
+  const eligible = villagers.filter(v =>
+    v.age === 'adult' && !v.isPriest &&
+    v.state === 'wander' && v.handPartnerId === null);
+  if (eligible.length === 0) return;
+
+  // Childless+solo leave first; families with children leave last
+  const hasDependent = v => villagers.some(v2 =>
+    v2.homeId === v.homeId && (v2.age === 'child' || v2.age === 'teen'));
+  const hasMate = v => villagers.some(v2 =>
+    v2.homeId === v.homeId && v2.id !== v.id && v2.age === 'adult' && !v2.isPriest);
+  eligible.sort((a, b) => {
+    const ta = (hasDependent(a) ? 2 : 0) + (hasMate(a) ? 1 : 0);
+    const tb = (hasDependent(b) ? 2 : 0) + (hasMate(b) ? 1 : 0);
+    return ta - tb;
+  });
+
+  const leaving = new Set();   // guard against sending someone twice
+
+  const sendAway = (v, dir) => {
+    if (leaving.has(v.id)) return;
+    leaving.add(v.id);
+    v._releaseHand();
+    v.state = 'emigrate'; v.stateMs = 99999;
+    v.tnx = dir; v.tny = v.ny;
+  };
+
+  const slots = Math.min(excess, eligible.length);
+  for (let i = 0; i < slots; i++) {
+    const leaver = eligible[i];
+    if (leaving.has(leaver.id)) continue;
+    if (Math.random() >= p) continue;
+
+    const goRight = leaver.nx < 0.5 ? Math.random() < 0.3 : Math.random() < 0.7;
+    const dir = goRight ? 1.18 : -0.18;
+
+    sendAway(leaver, dir);
+
+    // Whole family leaves together: partner + dependent children/teens
+    if (leaver.partnerId !== null) {
+      const partner = villagers.find(v => v.id === leaver.partnerId && !v.isPriest);
+      if (partner) sendAway(partner, dir);
+    }
+    if (leaver.homeId !== null) {
+      villagers
+        .filter(v => v.homeId === leaver.homeId && (v.age === 'child' || v.age === 'teen'))
+        .forEach(v => sendAway(v, dir));
+    }
+  }
+}
+
+// ── PERSISTENCE ──────────────────────────────────────────────────────────────
+function saveState() {
+  try {
+    const DEAD_S  = ['dead','being_carried','at_grave','buried'];
+    const TRANS_S = ['fetch_body','carry_body','funeral','going_home','emigrate','mob'];
+    const state = {
+      gt: gameTime|0, arr: arrivalCount, nat: nextArrivalMs|0, nid: nextId, lc: leaverCount,
+      v: villagers
+        .filter(v => !DEAD_S.includes(v.state))
+        .map(v => ({
+          id:v.id, nx:+v.nx.toFixed(4), ny:+v.ny.toFixed(4), g:v.gender, a:v.age,
+          hid:v.homeId, pid:v.partnerId,
+          s:  TRANS_S.includes(v.state) ? 'wander' : v.state,
+          sm: TRANS_S.includes(v.state) ? 0 : v.stateMs|0,
+          am:v.ageMs|0, cm:v.childMs|0, fe:v.fertility,
+          tnx:+v.tnx.toFixed(4), tny:+v.tny.toFixed(4), p:v.isPriest?1:0, hc:v.hairColor,
+          sc:v.skinColor||null, stc:v.shirtColor||null,
+        })),
+      h: houses.map(h => ({ id:h.id, nx:+h.nx.toFixed(4), ny:+h.ny.toFixed(4), c:+h.completion.toFixed(3), bm:h.buildMs|0, am:h.ageMs|0, ex:h.extensions, xp:+h.extProgress.toFixed(3), xd:h.extPending?1:0, ag:h.animalsGiven?1:0, bn:h.burning?1:0, bp:+h.burnProgress.toFixed(4) })),
+      ch: church ? { nx:+church.nx.toFixed(4), ny:+church.ny.toFixed(4), c:+church.completion.toFixed(3), bm:church.buildMs|0, am:church.ageMs|0, lb:church.lastBellDay } : null,
+      gy: graveyard ? {
+        nx: +graveyard.nx.toFixed(4), ny: +graveyard.ny.toFixed(4),
+        c: graveyard.crosses.map(g => [+g.nx.toFixed(4), +g.ny.toFixed(4)]),
+        td: graveyard.totalDead || 0,
+      } : null,
+      ml: mausoleum ? {
+        nx: +mausoleum.nx.toFixed(4), ny: +mausoleum.ny.toFixed(4),
+        c: +mausoleum.completion.toFixed(3), bm: mausoleum.buildMs|0,
+        ic: mausoleum.interredCount,
+      } : null,
+      pt: priestTomb ? { nx: +priestTomb.nx.toFixed(4), ny: +priestTomb.ny.toFixed(4) } : null,
+      pr: priestRespawnPending ? 1 : 0,
+      ru: ruins.map(r => ({ nx: +r.nx.toFixed(4), ny: +r.ny.toFixed(4), ws: +r.widthScale.toFixed(4) })),
+      kg: kitchenGardens.map(g => ({
+        id: g.id, hid: g.houseId,
+        nx: +g.nx.toFixed(4), ny: +g.ny.toFixed(4),
+        b: g.built ? 1 : 0, bm: g.buildMs|0,
+        gm: g.growMs|0,
+        r: g.rows.map(r => [r.type === 'carrot' ? 0 : r.type === 'cabbage' ? 1 : 2, r.stolen ? 1 : 0]),
+      })),
+      // Sparse track data — only cells with meaningful wear/paving.
+      trkW: (() => { const o = {}; trackWear.forEach((w, i) => { if (w >= 1) o[i] = Math.round(w); }); return o; })(),
+      trkP: (() => { const o = {}; trackPave.forEach((p, i) => { if (p >= 0.01) o[i] = +(p.toFixed(3)); }); return o; })(),
+      po: pond ? { nx: +pond.nx.toFixed(4), ny: +pond.ny.toFixed(4), rx: +pond.rx.toFixed(4), ry: +pond.ry.toFixed(4) } : null,
+    };
+    localStorage.setItem('vs', JSON.stringify(state));
+  } catch(_) {}
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem('vs');
+    if (!raw) return false;
+    const s = JSON.parse(raw);
+    gameTime = s.gt||0; arrivalCount = s.arr||0; nextArrivalMs = s.nat||800; nextId = s.nid||1; leaverCount = s.lc||0;
+    villagers = (s.v||[]).map(d => new Villager({
+      id:d.id, nx:d.nx, ny:d.ny||0.5, gender:d.g, age:d.a,
+      homeId:d.hid, partnerId:d.pid||null, state:d.s, stateMs:d.sm, ageMs:d.am, childMs:d.cm, fertility:d.fe,
+      tnx:d.tnx, tny:d.tny||0.5, isPriest:!!d.p, hairColor:d.hc, skinColor:d.sc||null, shirtColor:d.stc||null,
+    }));
+    houses = (s.h||[]).map(d => {
+      const h = new House(d.nx, d.ny||0.5);
+      h.id = d.id;
+      h.completion = d.c; h.buildMs = d.bm; h.ageMs = d.am||0;
+      h.extensions = d.ex||0; h.extProgress = d.xp||0; h.extPending = !!d.xd;
+      h.animalsGiven = !!d.ag;
+      if (d.bn) { h.burning = true; h.burnProgress = d.bp || 0; }
+      return h;
+    });
+    if (s.ch) {
+      church = new Church(s.ch.nx, s.ch.ny||0.35);
+      church.completion = s.ch.c; church.buildMs = s.ch.bm;
+      church.ageMs = s.ch.am || 0; church.lastBellDay = s.ch.lb ?? -1;
+    }
+    if (s.gy) {
+      graveyard = { nx: s.gy.nx, ny: s.gy.ny,
+        crosses: (s.gy.c || []).map(g => ({ nx: g[0], ny: g[1] })),
+        totalDead: s.gy.td || (s.gy.c ? s.gy.c.length : 0) };
+    }
+    if (s.ml) {
+      mausoleum = new Mausoleum(s.ml.nx, s.ml.ny, s.ml.ic);
+      mausoleum.completion = s.ml.c; mausoleum.buildMs = s.ml.bm;
+    }
+    if (s.pt) priestTomb = { nx: s.pt.nx, ny: s.pt.ny };
+    if (s.pr) priestRespawnPending = true;
+    trackWear = new Float32Array(TRACK_W * TRACK_H);
+    trackPave = new Float32Array(TRACK_W * TRACK_H);
+    if (s.trkW) for (const [k, v] of Object.entries(s.trkW)) trackWear[+k] = v;
+    if (s.trkP) for (const [k, v] of Object.entries(s.trkP)) trackPave[+k] = v;
+    const GTYPES = ['carrot', 'cabbage', 'turnip'];
+    kitchenGardens = (s.kg || []).map(d => {
+      const g = new KitchenGarden(d.hid, d.nx, d.ny);
+      g.id = d.id; g.built = !!d.b; g.buildMs = d.bm; g.growMs = d.gm;
+      g.rows = d.r.map(([tp, st]) => ({ type: GTYPES[tp], stolen: !!st }));
+      return g;
+    });
+    // Re-spawn farm animals for houses that had them before save
+    farmAnimals = [];
+    for (const h of houses) {
+      if (h.animalsGiven) spawnAnimalsForHouse(h);
+    }
+    // Restore pond and re-spawn ducks
+    pond  = null; ducks = [];
+    if (s.po) {
+      pond  = { nx: s.po.nx, ny: s.po.ny, rx: s.po.rx, ry: s.po.ry };
+      ducks = [0, 1, 2, 3].map(i => new Duck(i));
+    }
+    if (s.ru) ruins = s.ru.map(d => new Ruin(d.nx, d.ny, d.ws || 1));
+    return true;
+  } catch(_) { return false; }
+}
+
+// ── DEATH & GRAVEYARD ────────────────────────────────────────────────────────
+
+// Search for a graveyard position near the ideal spot that avoids existing houses.
+function pickGraveyardPos() {
+  const baseNx = church ? Math.max(0.05, church.nx - 0.22) : 0.12;
+  const baseNy = church ? Math.min(0.90, church.ny + 0.08) : 0.45;
+  let bestNx = baseNx, bestNy = baseNy, bestScore = Infinity;
+  for (let dx = -0.25; dx <= 0.25; dx += 0.04) {
+    for (let dy = -0.15; dy <= 0.15; dy += 0.04) {
+      const nx = Math.max(0.05, Math.min(0.94, baseNx + dx));
+      const ny = Math.max(0.10, Math.min(0.90, baseNy + dy));
+      const minHouse = houses.length > 0
+        ? Math.min(...houses.map(h => Math.hypot(h.nx - nx, h.ny - ny)))
+        : 1;
+      const score = Math.hypot(nx - baseNx, ny - baseNy) + (minHouse < 0.15 ? 100 : 0);
+      if (score < bestScore) { bestScore = score; bestNx = nx; bestNy = ny; }
+    }
+  }
+  return { nx: bestNx, ny: bestNy };
+}
+
+function ensureGraveyard() {
+  if (graveyard) return;
+  const pos = pickGraveyardPos();
+  graveyard = { nx: pos.nx, ny: pos.ny, crosses: [] };
+}
+
+function depositBody(carrier, body) {
+  body.nx = carrier.nx; body.ny = carrier.ny;
+  body.state = 'at_grave';
+  body.stateMs = 15000 + Math.random() * 10000;
+  carrier.carryBodyId = null;
+  carrier._pickTarget();
+  let n = 0;
+  villagers.forEach(v => {
+    if (n >= 4) return;
+    if (v.state === 'wander' && v !== carrier && v !== body && v.handPartnerId === null) {
+      v.state = 'funeral'; v.stateMs = 12000 + Math.random() * 10000;
+      v.tnx = body.nx + (Math.random()-0.5)*0.14;
+      v.tny = body.ny + (Math.random()-0.5)*0.10;
+      n++;
+    }
+  });
+}
+
+function updateDeaths() {
+  // Recover orphaned being_carried bodies: carrier was interrupted (e.g. flee) before
+  // reaching the graveyard, leaving the body stranded with no one tracking it.
+  villagers.filter(v => v.state === 'being_carried' && !v.isPriest).forEach(body => {
+    if (!villagers.some(c => c.carryBodyId === body.id)) body.state = 'dead';
+  });
+
+  villagers.filter(v => v.state === 'dead' && !v.isPriest).forEach(body => {
+    if (villagers.some(c => c.carryBodyId === body.id)) return;
+    const carrier = villagers.find(v =>
+      (v.age === 'adult' || v.age === 'old') && v.state === 'wander' &&
+      v.carryBodyId === null && v.handPartnerId === null);
+    if (!carrier) return;
+    ensureGraveyard();
+    carrier.carryBodyId = body.id;
+    carrier.state = 'fetch_body'; carrier.stateMs = 99999;
+    carrier.tnx = body.nx; carrier.tny = body.ny;
+  });
+  villagers = villagers.filter(v => {
+    if (v.state === 'emigrate' && (v.nx < -0.12 || v.nx > 1.12)) {
+      leaverCount++;
+      return false;
+    }
+    return v.state !== 'buried';
+  });
+}
+
+// Find a mausoleum position near the graveyard that:
+//   • is horizontally clear of the canvas edges (iron fence needs ~0.09 nx margin)
+//   • is deep enough that the full spire stays in the ground area (ny ≥ 0.25)
+//   • prefers to be away from houses (≥ 0.12 nx distance)
+function pickMausoleumPos() {
+  const gx = graveyard.nx, gy = graveyard.ny;
+  let bestNx = null, bestNy = null, bestScore = Infinity;
+  for (let dx = -0.36; dx <= 0.36; dx += 0.04) {
+    for (let dy = -0.26; dy <= 0.26; dy += 0.04) {
+      const nx = gx + dx, ny = gy + dy;
+      if (nx < 0.10 || nx > 0.90 || ny < 0.25 || ny > 0.90) continue;
+      const minHouse = houses.length > 0
+        ? Math.min(...houses.map(h => Math.hypot(h.nx - nx, h.ny - ny)))
+        : 1;
+      const score = Math.hypot(dx, dy) + (minHouse < 0.12 ? 100 : 0);
+      if (score < bestScore) { bestScore = score; bestNx = nx; bestNy = ny; }
+    }
+  }
+  return bestNx !== null ? { nx: bestNx, ny: bestNy } : { nx: 0.18, ny: 0.42 };
+}
+
+function checkMausoleum() {
+  if (mausoleum) return;
+  if (!graveyard || graveyard.crosses.length < 100) return;
+  const toAbsorb = Math.floor(graveyard.crosses.length / 2);
+  graveyard.totalDead = graveyard.totalDead || graveyard.crosses.length;
+  graveyard.crosses.splice(0, toAbsorb);
+  const pos = pickMausoleumPos();
+  mausoleum = new Mausoleum(pos.nx, pos.ny, toAbsorb);
+}
+
+function startPriestSequence(nx, ny) {
+  priestSequence = { phase: 'descend', ms: 0, nx, ny, chorusMs: 0 };
+  for (let i = 0; i < 3; i++) {
+    const a = new Angel(0.25 + i * 0.25, -0.10, i);
+    a.tnx = nx + (i - 1) * 0.07;
+    a.tny = Math.max(0.05, ny - 0.10);
+    angels.push(a);
+  }
+  playHeavenlyChorus();
+}
+
+function updatePriestSequence(dt) {
+  if (!priestSequence) return;
+  const ps = priestSequence;
+  ps.ms += dt;
+  angels.forEach(a => a.update(dt));
+
+  if (ps.phase === 'descend') {
+    if (ps.ms >= 6000) { ps.phase = 'mourn'; ps.ms = 0; ps.chorusMs = 18000; }
+
+  } else if (ps.phase === 'mourn') {
+    // Bob gently in place
+    angels.forEach((a, i) => {
+      a.tny = Math.max(0.02, ps.ny - 0.10 + Math.sin(ps.ms * 0.001 + i * 2.1) * 0.018);
+    });
+    ps.chorusMs += dt;
+    if (ps.chorusMs >= 15000 + (Math.sin(ps.ms * 0.013) + 1) * 4000) {
+      playHeavenlyChorus();
+      ps.chorusMs = 0;
+    }
+    if (ps.ms >= 60000) {
+      ps.phase = 'build_tomb'; ps.ms = 0;
+      angels.forEach(a => { a.tnx = ps.nx; a.tny = Math.max(0.04, ps.ny - 0.04); });
+      playHeavenlyChorus();
+    }
+
+  } else if (ps.phase === 'build_tomb') {
+    if (ps.ms >= 5000) {
+      priestTomb = { nx: ps.nx, ny: ps.ny };
+      villagers = villagers.filter(v => !(v.isPriest && v.state === 'dead'));
+      ps.phase = 'ascend'; ps.ms = 0;
+      angels.forEach((a, i) => { a.tnx = 0.2 + i * 0.3; a.tny = -0.15; });
+    }
+
+  } else if (ps.phase === 'ascend') {
+    if (ps.ms >= 7000) {
+      angels = [];
+      priestSequence = null;
+      priestRespawnPending = true;
+    }
+  }
+}
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────────
+let lastFrameTs = 0, lastSaveTs = 0;
+
+function loop(ts) {
+  const dt = Math.min(ts - lastFrameTs, 100);
+  lastFrameTs = ts;
+  gameTime += dt;
+  try {
+  if (gameTime - lastSaveTs > 14000) { saveState(); lastSaveTs = gameTime; }
+
+  updateArrivals();
+  checkEmigration();
+  villagers.forEach(v => v.update(dt));
+  houses.forEach(h => h.update(dt));
+  checkMob(dt);
+  checkBurning();
+  if (church) church.update(dt);
+  birds.forEach(b => b.update(dt));
+  dragon.update(dt);
+  wizard.update(dt);
+  wolf.update(dt);
+  ferret.update(dt);
+  bear.update(dt);
+  ghost.update(dt);
+  groundBirds.forEach(b => b.update(dt));
+  rabbits.forEach(r => r.update(dt));
+  kitchenGardens.forEach(g => g.update(dt));
+  checkFarmAnimals();
+  farmAnimals.forEach(a => a.update(dt));
+  checkPond();
+  ducks.forEach(d => d.update(dt));
+  updateTracks(dt);
+  checkMausoleum();
+  if (mausoleum) mausoleum.update(dt);
+  updatePriestSequence(dt);
+  updateDeaths();
+
+  drawBackground();
+
+  // Painter's algorithm: sort all ground objects back-to-front by screen Y
+  const drawables = [
+    ...ruins.map(r => ({ sy: r.sy, draw: () => r.draw() })),
+    ...houses.map(h  => ({ sy: h.sy,  draw: () => h.draw()  })),
+    ...kitchenGardens.map(g => ({ sy: g.sy, draw: () => g.draw() })),
+    ...(church ? [{ sy: church.sy, draw: () => church.draw() }] : []),
+    ...(mausoleum ? [{ sy: mausoleum.sy, draw: () => mausoleum.draw() }] : []),
+    ...villagers.map(v => ({ sy: v.sy, draw: () => v.draw() })),
+    ...(wizard.active ? [{ sy: wizard.sy, draw: () => wizard.draw() }] : []),
+    ...(wolf.active   ? [{ sy: wolf.sy,   draw: () => wolf.draw()   }] : []),
+    ...(ferret.active ? [{ sy: ferret.sy, draw: () => ferret.draw() }] : []),
+    ...(bear.active   ? [{ sy: bear.sy,   draw: () => bear.draw()   }] : []),
+    ...(ghost.active  ? [{ sy: ghost.sy,  draw: () => ghost.draw()  }] : []),
+    ...groundBirds.map(b => ({ sy: b.sy, draw: () => b.draw() })),
+    ...rabbits.map(r => ({ sy: r.sy, draw: () => r.draw() })),
+    ...farmAnimals.map(a => ({ sy: a.sy, draw: () => a.draw() })),
+    ...(pond ? [{ sy: worldY(pond.ny - pond.ry), draw: () => drawPond() }] : []),
+    ...ducks.map(d => ({ sy: d.sy, draw: () => d.draw() })),
+    ...(graveyard ? graveyard.crosses.map(g => ({
+      sy: worldY(g.ny),
+      draw: () => {
+        const t = tod(), gx = g.nx*W, gy = worldY(g.ny), s = H/600;
+        const col = dimHex('#d8d0bc', ambientLight(t));
+        box(gx-1.2*s, gy-14*s, 2.4*s, 15*s, col);
+        box(gx-6*s,   gy-11*s, 12*s,  2.5*s, col);
+      },
+    })) : []),
+    ...(priestTomb ? [{ sy: worldY(priestTomb.ny), draw: () => {
+      const t = tod(), light = ambientLight(t);
+      const di = col => dimHex(col, light);
+      const x = priestTomb.nx * W, y = worldY(priestTomb.ny), s = H / 1200;
+      const stone = di('#c0b8a0');
+      const red   = di('#c03030');
+      const gold  = di('#d4a020');
+      const tw = 26*s, th = 14*s;
+      // Base
+      box(x - tw/2 - 3*s, y - 2*s, tw + 6*s, 4*s, stone);
+      // Sarcophagus body
+      box(x - tw/2, y - 2*s - th, tw, th, red);
+      // Gold bands on body
+      box(x - tw/2, y - 2*s - th, tw, 3*s, gold);
+      box(x - tw/2, y - 5*s - th, tw, 2*s, gold);
+      // Lid — slightly wider, gabled top
+      poly([
+        [x - tw/2 - 2*s, y - 2*s - th],
+        [x + tw/2 + 2*s, y - 2*s - th],
+        [x + tw/2,       y - 2*s - th - 7*s],
+        [x,              y - 2*s - th - 10*s],
+        [x - tw/2,       y - 2*s - th - 7*s],
+      ], red);
+      // Gold ridge on lid
+      box(x - tw/2 - 1*s, y - 2*s - th - 1*s, tw + 2*s, 2*s, gold);
+      // Gold cross on top
+      const cty = y - 2*s - th - 10*s;
+      box(x - 1.5*s, cty - 12*s, 3*s, 12*s, gold);
+      box(x - 5*s,   cty - 9*s,  10*s, 3*s, gold);
+    }}] : []),
+  ];
+  drawables.sort((a, b) => a.sy - b.sy);
+  drawables.forEach(d => { try { d.draw(); } catch(e) { console.error('draw error:', e); ctx.globalAlpha = 1; } });
+
+  // Angels drawn above all ground entities
+  angels.forEach(a => { try { a.draw(); } catch(e) { ctx.globalAlpha = 1; } });
+
+  // Sky inhabitants drawn on top of everything
+  birds.forEach(b => b.draw());
+  dragon.draw();
+
+  updatePanel();
+  updateDevCon();
+  } catch (err) {
+    console.error('loop error:', err);
+    ctx.globalAlpha = 1; // recover canvas state if a draw call left it dirty
+  }
+  requestAnimationFrame(loop);
+}
+
+// ── UI PANEL ──────────────────────────────────────────────────────────────────
+const panel   = document.getElementById('panel');
+const pstats  = document.getElementById('pstats');
+const sndBtn  = document.getElementById('sndBtn');
+let panelOpen = false;
+
+function phaseName(t) {
+  if (t < 0.125 || t >= 0.875) return 'Night';
+  if (t < 0.375) return 'Dawn';
+  if (t < 0.625) return 'Day';
+  return 'Dusk';
+}
+
+function updatePanel() {
+  if (!panelOpen) return;
+  const t = tod();
+  const hh = Math.floor(t * 24);
+  const mm = Math.floor((t * 1440) % 60);
+  const clock = `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+  const alive = villagers.filter(v => v.state !== 'dead' && v.state !== 'buried');
+  const counts = { child:0, teen:0, adult:0, old:0, priest:0 };
+  alive.forEach(v => {
+    if (v.isPriest) counts.priest++;
+    else counts[v.age] = (counts[v.age] || 0) + 1;
+  });
+  const row = (label, val) =>
+    `<div class="row"><span>${label}</span><span>${val}</span></div>`;
+  pstats.innerHTML =
+    row('Day',     dayNum() + 1) +
+    row('Time',    `${clock} &nbsp;${phaseName(t)}`) +
+    '<hr>' +
+    row('Children', counts.child) +
+    row('Teens',    counts.teen) +
+    row('Adults',   counts.adult) +
+    row('Elders',   counts.old) +
+    (counts.priest ? row('Priest', counts.priest) : '') +
+    '<hr>' +
+    row('Houses',  houses.length) +
+    row('Church',  church ? (church.completion >= 1 ? 'built' : 'building') : 'none') +
+    row('Graves',  graveyard ? graveyard.crosses.length : 0) +
+    (mausoleum ? row('Mausoleum', mausoleum.completion < 1 ? 'building'
+      : ['crypt','classical','ornate','grand'][Math.min(3, Math.floor(mausoleum.elaborateness * 4))]) : '') +
+    (leaverCount > 0 ? row('Left village', leaverCount) : '');
+}
+
+function togglePanel() {
+  panelOpen = !panelOpen;
+  panel.style.display = panelOpen ? 'block' : 'none';
+  updatePanel();
+}
+
+// ── DEV CONSOLE ───────────────────────────────────────────────────────────────
+const devcon  = document.getElementById('devcon');
+const dcstats = document.getElementById('dcstats');
+const dcinput = document.getElementById('dcinput');
+const dclog   = document.getElementById('dclog');
+let devOpen   = false;
+
+function updateDevCon() {
+  if (!devOpen) return;
+  const t = tod();
+  const fmt = ms => `${(ms/1000).toFixed(1)}s`;
+  const stateCounts = {};
+  villagers.forEach(v => { stateCounts[v.state] = (stateCounts[v.state]||0)+1; });
+  const stateStr = Object.entries(stateCounts).map(([k,v])=>`${k}:${v}`).join('  ');
+  dcstats.textContent = [
+    `time   day ${dayNum()+1}  tod ${t.toFixed(3)}  gt ${fmt(gameTime)}`,
+    `pop    ${villagers.length} villagers`,
+    `states ${stateStr}`,
+    `wolf   ${wolf.active ? `ACTIVE nx=${wolf.nx.toFixed(2)}` : 'idle'}`,
+    `bear   ${bear.active ? `ACTIVE nx=${bear.nx.toFixed(2)}` : `idle (in ${fmt(bear.nextAppear-bear.elapsed)})`}`,
+    `ghost  ${ghost.active ? 'ACTIVE' : 'idle'}`,
+    `wizard ${wizard.active ? `ACTIVE nx=${wizard.nx.toFixed(2)} changes=${wizard.changesLeft}` : `idle (in ${fmt(wizard.nextAppear-wizard.elapsed)})`}`,
+    `church ${church ? `c=${church.completion.toFixed(2)} age=${fmt(church.ageMs)} bell=${church.hasBell} gargoyles=${church.hasGargoyles}` : 'none'}`,
+    `graves ${graveyard ? graveyard.crosses.length : 0}  totalDead=${graveyard?.totalDead||0}`,
+    `mausoleum ${mausoleum ? `c=${mausoleum.completion.toFixed(2)} e=${mausoleum.elaborateness.toFixed(2)}` : 'none'}`,
+  ].join('\n');
+}
+
+function devCommand(raw) {
+  const cmd = raw.trim().toLowerCase();
+  const parts = cmd.split(/\s+/);
+  let msg = '';
+  if (cmd === 'wolf') {
+    wolf.active = true; wolf.nx = Math.random()<0.5?0.1:0.9; wolf.ny=0.3+Math.random()*0.5;
+    wolf._pickTarget(); wolf.soundMs = 500;
+    msg = 'wolf spawned';
+  } else if (cmd === 'bear') {
+    bear.active = true; bear.nx = 0.1; bear.dnx = 0.000058; bear.facing = 1; bear.ny = 0.3+Math.random()*0.5;
+    msg = 'bear spawned';
+  } else if (cmd === 'wizard') {
+    wizard.active = true; wizard.nx = -0.06; wizard.dnx = 0.000060; wizard.ny = 0.2+Math.random()*0.6; wizard.changesLeft = 3;
+    msg = 'wizard summoned';
+  } else if (cmd === 'ghost') {
+    if (!graveyard || !graveyard.crosses.length) { msg = 'no graveyard yet'; }
+    else {
+      const cross = graveyard.crosses[Math.floor(Math.random()*graveyard.crosses.length)];
+      ghost.nx = cross.nx; ghost.ny = cross.ny; ghost.active = true; ghost._pickTarget();
+      msg = 'ghost spawned';
+    }
+  } else if (cmd === 'ferret') {
+    const left = Math.random() < 0.5;
+    ferret.active = true; ferret.nx = left ? -0.08 : 1.08;
+    ferret.dnx = left ? 0.00019 : -0.00019; ferret.facing = left ? 1 : -1;
+    ferret.ny = 0.52 + Math.random() * 0.44; ferret.animT = 0;
+    msg = 'ferret released';
+  } else if (cmd === 'bell') {
+    playChurchBell(); msg = 'ding dong';
+  } else if (cmd === 'mausoleum') {
+    if (mausoleum) { msg = 'already exists'; }
+    else {
+      ensureGraveyard();
+      while (graveyard.crosses.length < 100) graveyard.crosses.push({nx:graveyard.nx+(Math.random()-0.5)*0.15,ny:graveyard.ny+(Math.random()-0.5)*0.1});
+      graveyard.totalDead = graveyard.crosses.length;
+      checkMausoleum();
+      msg = 'mausoleum triggered';
+    }
+  } else if (parts[0] === 'day' && parts[1]) {
+    const n = parseInt(parts[1]);
+    if (!isNaN(n)) { gameTime = n * DAY_MS + DAY_MS * 0.26; msg = `jumped to day ${n+1}`; }
+    else msg = 'usage: day <number>';
+  } else if (parts[0] === 'tod' && parts[1]) {
+    const f = parseFloat(parts[1]);
+    if (!isNaN(f)) { gameTime = Math.floor(gameTime/DAY_MS)*DAY_MS + f*DAY_MS; msg = `tod set to ${f.toFixed(3)}`; }
+    else msg = 'usage: tod <0-1>';
+  } else if (cmd === 'kill') {
+    const v = villagers.find(v => v.age === 'old' && v.state !== 'dead');
+    if (v) { v._die(); msg = `killed villager ${v.id}`; }
+    else msg = 'no elders to kill';
+  } else if (cmd === 'enchant') {
+    villagers.forEach(v => { v.skinColor=WIZ_SKINS[Math.floor(Math.random()*WIZ_SKINS.length)]; v.shirtColor=WIZ_SHIRTS[Math.floor(Math.random()*WIZ_SHIRTS.length)]; });
+    msg = `enchanted ${villagers.length} villagers`;
+  } else if (cmd === 'reach') {
+    msg = checkReachability();
+  } else if (cmd === 'mob') {
+    nextMobCheckMs = 0;
+    msg = 'Mob check forced — will run next frame';
+  } else if (cmd === 'help') {
+    msg = 'wolf  bear  wizard  ghost  ferret  bell  mausoleum  kill  enchant  day N  tod N  reach  mob';
+  } else if (cmd) {
+    msg = `unknown: ${cmd} (try help)`;
+  }
+  dclog.textContent = msg ? '> ' + msg : '';
+}
+
+function buildReachGrid(GW, GH, excludeId) {
+  const grid = new Uint8Array(GW * GH);
+  const s = H / 600;
+  const MARGIN = 0.01;
+  const markRect = (cx, halfW, y1, y2) => {
+    const gx1 = Math.max(0, Math.floor((cx - halfW - MARGIN) * GW));
+    const gx2 = Math.min(GW - 1, Math.ceil((cx + halfW + MARGIN) * GW));
+    const gy1 = Math.max(0, Math.floor(y1 * GH));
+    const gy2 = Math.min(GH - 1, Math.ceil(y2 * GH));
+    for (let gy = gy1; gy <= gy2; gy++) for (let gx = gx1; gx <= gx2; gx++) grid[gy * GW + gx] = 1;
+  };
+  for (const h of houses) {
+    if (h.id === excludeId || h.completion < 0.25) continue;
+    markRect(h.nx, 31 * h.widthScale * s / W, h.ny - BLDG_BACK, h.ny + BLDG_FRONT);
+  }
+  if (church && church.completion > 0.25)    markRect(church.nx,    50 * s / W, church.ny - BLDG_BACK, church.ny + BLDG_FRONT);
+  if (mausoleum && mausoleum.completion > 0.25) markRect(mausoleum.nx, 52 * s / W, mausoleum.ny - BLDG_BACK, mausoleum.ny + BLDG_FRONT);
+  return grid;
+}
+
+function bfsReach(grid, GW, GH, startGx, startGy) {
+  const vis = new Uint8Array(GW * GH);
+  if (grid[startGy * GW + startGx]) return vis;
+  const q = [startGy * GW + startGx];
+  vis[q[0]] = 1;
+  let head = 0;
+  while (head < q.length) {
+    const idx = q[head++];
+    const gx = idx % GW, gy = (idx / GW) | 0;
+    for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]) {
+      const nx2 = gx + dx, ny2 = gy + dy;
+      if (nx2 < 0 || nx2 >= GW || ny2 < 0 || ny2 >= GH) continue;
+      const i2 = ny2 * GW + nx2;
+      if (!grid[i2] && !vis[i2]) { vis[i2] = 1; q.push(i2); }
+    }
+  }
+  return vis;
+}
+
+function findBlockingHouse() {
+  const GW = 120, GH = 80;
+  // Base reachability (no exclusions)
+  const baseGrid = buildReachGrid(GW, GH, null);
+  // Find a valid start cell near bottom-left
+  let startIdx = -1;
+  for (const [sx, sy] of [[5,GH-5],[10,GH-5],[5,GH-10],[10,GH-10]]) {
+    if (!baseGrid[sy * GW + sx]) { startIdx = sy * GW + sx; break; }
+  }
+  if (startIdx < 0) return null;
+  const startGx = startIdx % GW, startGy = (startIdx / GW) | 0;
+  const baseVis = bfsReach(baseGrid, GW, GH, startGx, startGy);
+
+  // Check each house: does removing it improve connectivity?
+  for (const h of houses) {
+    if (h.completion < 0.5 || h.burning) continue;
+    const s = H / 600;
+    const halfW = 31 * h.widthScale * s / W;
+    // Check if any other house's approach point is unreachable
+    let someBlocked = false;
+    for (const h2 of houses) {
+      if (h2 === h || h2.completion < 0.5) continue;
+      const approachNy = h2.ny + BLDG_FRONT + 0.025;
+      const gx = Math.round(h2.nx * GW);
+      const gy = Math.round(approachNy * GH);
+      if (gy >= 0 && gy < GH && gx >= 0 && gx < GW && !baseVis[gy * GW + gx]) {
+        someBlocked = true; break;
+      }
+    }
+    if (!someBlocked) continue;
+    // Try removing h
+    const testGrid = buildReachGrid(GW, GH, h.id);
+    const testVis  = bfsReach(testGrid, GW, GH, startGx, startGy);
+    let stillBlocked = false;
+    for (const h2 of houses) {
+      if (h2 === h || h2.completion < 0.5) continue;
+      const approachNy = h2.ny + BLDG_FRONT + 0.025;
+      const gx = Math.round(h2.nx * GW);
+      const gy = Math.round(approachNy * GH);
+      if (gy >= 0 && gy < GH && gx >= 0 && gx < GW && !testVis[gy * GW + gx]) {
+        stillBlocked = true; break;
+      }
+    }
+    if (!stillBlocked) return h; // removing h fixes the problem
+  }
+  return null;
+}
+
+function checkMob(dt) {
+  if (houses.length < 4) return;
+  nextMobCheckMs -= dt;
+  if (nextMobCheckMs > 0) return;
+  nextMobCheckMs = 60000 + Math.random() * 60000; // recheck in 1-2 min
+
+  if (mobTargetId !== null) {
+    // Check if the mob task is still active
+    const tgt = houses.find(h => h.id === mobTargetId);
+    if (!tgt || tgt.burning) { mobTargetId = null; }
+    return;
+  }
+
+  const blocker = findBlockingHouse();
+  if (!blocker) return;
+
+  // Recruit 2-5 wandering adults
+  const candidates = villagers.filter(v =>
+    v.state === 'wander' && v.age === 'adult' && !v.isPriest && !v.handPartnerId
+  );
+  if (candidates.length < 2) return;
+  const count = Math.min(candidates.length, 2 + Math.floor(Math.random() * 4));
+  mobTargetId = blocker.id;
+  candidates.slice(0, count).forEach(v => {
+    v.state = 'mob';
+    v.stateMs = 120000; // 2 min timeout
+  });
+}
+
+function checkBurning() {
+  for (const h of houses) {
+    if (!h.burning || h.burnProgress < 1) continue;
+    // Create ruin
+    ruins.push(new Ruin(h.nx, h.ny, h.widthScale));
+    // Displace residents
+    villagers.filter(v => v.homeId === h.id).forEach(v => {
+      v.homeId = null;
+      if (v.state === 'sleep') v.state = 'wander';
+      assignHome(v);
+    });
+    // Remove associated kitchen garden
+    const kgIdx = kitchenGardens.findIndex(g => g.houseId === h.id);
+    if (kgIdx >= 0) kitchenGardens.splice(kgIdx, 1);
+    // Reset mob target if this was it
+    if (mobTargetId === h.id) mobTargetId = null;
+    // Remove the house
+    const idx = houses.indexOf(h);
+    if (idx >= 0) houses.splice(idx, 1);
+    break; // only one per frame
+  }
+}
+
+// Grid flood-fill reachability check.
+// Returns a string describing which building doors cannot be reached from open ground.
+function checkReachability() {
+  const GW = 160, GH = 100;
+  // 0 = open, 1 = blocked, 2 = visited
+  const grid = new Uint8Array(GW * GH);
+  const s = H / 600;
+
+  function markRect(cx, halfW, y1, y2) {
+    const xi1 = Math.max(0, Math.floor((cx - halfW) * GW) - 1);
+    const xi2 = Math.min(GW - 1, Math.ceil((cx + halfW) * GW) + 1);
+    const yi1 = Math.max(0, Math.floor(y1 * GH) - 1);
+    const yi2 = Math.min(GH - 1, Math.ceil(y2 * GH) + 1);
+    for (let y = yi1; y <= yi2; y++)
+      for (let x = xi1; x <= xi2; x++)
+        grid[y * GW + x] = 1;
+  }
+
+  for (const h of houses) {
+    if (h.completion < 0.25) continue;
+    markRect(h.nx, 31 * h.widthScale * s / W, h.ny - BLDG_BACK, h.ny + BLDG_FRONT);
+  }
+  if (church    && church.completion    > 0.25) markRect(church.nx,    50*s/W, church.ny    - BLDG_BACK, church.ny    + BLDG_FRONT);
+  if (mausoleum && mausoleum.completion > 0.25) markRect(mausoleum.nx, 52*s/W, mausoleum.ny - BLDG_BACK, mausoleum.ny + BLDG_FRONT);
+  if (pond) markRect(pond.nx, pond.rx, pond.ny - pond.ry, pond.ny + pond.ry);
+
+  // Pick an unblocked start cell near the bottom-left of the ground.
+  const candidates = [[0.05,0.92],[0.05,0.70],[0.95,0.92],[0.50,0.92]];
+  let startCell = null;
+  for (const [snx, sny] of candidates) {
+    const gx = Math.round(snx * GW), gy = Math.round(sny * GH);
+    if (grid[gy * GW + gx] === 0) { startCell = [gx, gy]; break; }
+  }
+  if (!startCell) return 'could not find open start cell';
+
+  // 8-connected BFS.
+  const queue = [startCell];
+  let qi = 0;
+  grid[startCell[1] * GW + startCell[0]] = 2;
+  const D = [-1,-1, 0,-1, 1,-1, -1,0, 1,0, -1,1, 0,1, 1,1];
+  while (qi < queue.length) {
+    const [cx, cy] = queue[qi++];
+    for (let d = 0; d < 16; d += 2) {
+      const nx2 = cx + D[d], ny2 = cy + D[d+1];
+      if (nx2 < 0 || nx2 >= GW || ny2 < 0 || ny2 >= GH) continue;
+      if (grid[ny2 * GW + nx2] !== 0) continue;
+      grid[ny2 * GW + nx2] = 2;
+      queue.push([nx2, ny2]);
+    }
+  }
+
+  // Check a point just in front of each building's door.
+  function reached(nx, ny) {
+    const approachNy = ny + BLDG_FRONT + 0.025; // just south of doorstep
+    const gx = Math.max(0, Math.min(GW-1, Math.round(nx * GW)));
+    const gy = Math.max(0, Math.min(GH-1, Math.round(approachNy * GH)));
+    return grid[gy * GW + gx] === 2;
+  }
+
+  const bad = [];
+  for (const h of houses) {
+    if (h.completion < 0.25) continue;
+    if (!reached(h.nx, h.ny)) bad.push(`H${h.id}@(${h.nx.toFixed(2)},${h.ny.toFixed(2)})`);
+  }
+  if (church && church.completion > 0.25 && !reached(church.nx, church.ny))
+    bad.push('church');
+
+  const visited = grid.reduce((n, v) => n + (v === 2 ? 1 : 0), 0);
+  const blocked  = grid.reduce((n, v) => n + (v === 1 ? 1 : 0), 0);
+  const summary  = `${visited}/${GW*GH} cells reachable, ${blocked} blocked`;
+  return bad.length ? `BLOCKED: ${bad.join(', ')} — ${summary}` : `all clear — ${summary}`;
+}
+
+function toggleDevCon() {
+  devOpen = !devOpen;
+  devcon.style.display = devOpen ? 'block' : 'none';
+  if (devOpen) { updateDevCon(); dcinput.focus(); }
+}
+
+dcinput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { devCommand(dcinput.value); dcinput.value = ''; }
+  e.stopPropagation(); // prevent Esc/backtick from closing while typing
+});
+
+sndBtn.addEventListener('click', () => {
+  soundEnabled = !soundEnabled;
+  if (soundEnabled && !audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  sndBtn.textContent = `Sound: ${soundEnabled ? 'ON' : 'OFF'}`;
+});
+
+const resetBtn     = document.getElementById('resetBtn');
+const resetConfirm = document.getElementById('resetConfirm');
+const resetYes     = document.getElementById('resetYes');
+const resetNo      = document.getElementById('resetNo');
+
+resetBtn.addEventListener('click', () => {
+  resetConfirm.style.display = 'block';
+  resetBtn.style.display = 'none';
+});
+resetNo.addEventListener('click', () => {
+  resetConfirm.style.display = 'none';
+  resetBtn.style.display = '';
+});
+resetYes.addEventListener('click', () => {
+  localStorage.removeItem('vs');
+  localStorage.removeItem('kg');
+  location.reload();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.preventDefault(); togglePanel(); }
+  if (e.key === '`') { e.preventDefault(); toggleDevCon(); }
+});
+
+// ── INIT ─────────────────────────────────────────────────────────────────────
+if (!loadState()) gameTime = DAY_MS * 0.25; // fresh sim starts at dawn
+for (let i = birds.length;       i < 7; i++) birds.push(new Bird());
+for (let i = groundBirds.length; i < 6; i++) groundBirds.push(new GroundBird(i + 100));
+for (let i = rabbits.length;     i < 4; i++) rabbits.push(new Rabbit(i + 200));
+requestAnimationFrame(ts => { lastFrameTs = ts; loop(ts); });
+
+})();
+</script>
+</body>
+</html>
