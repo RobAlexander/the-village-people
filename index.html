@@ -935,6 +935,10 @@ function pathDetour(nx, ny, tnx, tny) {
                  y1: mausoleum.ny - BLDG_BACK, y2: mausoleum.ny + BLDG_FRONT });
   if (pond)
     rects.push({ cx: pond.nx, halfW: pond.rx, y1: pond.ny - pond.ry, y2: pond.ny + pond.ry });
+  for (const g of kitchenGardens) {
+    if (!g.built) continue;
+    rects.push({ cx: g.nx, halfW: 24 * s / W, y1: g.ny - 0.068, y2: g.ny + 0.008 });
+  }
 
   for (const r of rects) {
     // Intentional approach: final target is within this obstacle's footprint — skip.
@@ -1262,14 +1266,14 @@ class Villager {
         break; // filtered from villagers[] by updateDeaths()
 
       case 'funeral':
-        this._moveTo(this.tnx, this.tny, dt, 0.000060, true);
+        this._moveTo(this.tnx, this.tny, dt, 0.000060, false);
         if (this.stateMs <= 0) this._pickTarget();
         break;
 
       case 'fetch_body': {
         const _b = villagers.find(v => v.id === this.carryBodyId);
         if (!_b || _b.state !== 'dead') { this.carryBodyId = null; this._pickTarget(); break; }
-        this._moveTo(_b.nx, _b.ny, dt, 0.000060, true);
+        this._moveTo(_b.nx, _b.ny, dt, 0.000060, false);
         if (Math.hypot(_b.nx - this.nx, _b.ny - this.ny) < 0.025) {
           _b.state = 'being_carried';
           ensureGraveyard();
@@ -1284,7 +1288,7 @@ class Villager {
         const _b = villagers.find(v => v.id === this.carryBodyId);
         if (!_b || _b.state !== 'being_carried') { this.carryBodyId = null; this._pickTarget(); break; }
         _b.nx = this.nx; _b.ny = this.ny;
-        this._moveTo(this.tnx, this.tny, dt, 0.000042, true); // slow — heavy load
+        this._moveTo(this.tnx, this.tny, dt, 0.000042, false); // slow — heavy load; skip avoidance so body can be retrieved from near buildings
         if (Math.hypot(this.tnx - this.nx, this.tny - this.ny) < 0.025) depositBody(this, _b);
         break;
       }
@@ -1323,7 +1327,7 @@ class Villager {
         if (!tgt || tgt.burning || tgt.completion < 0.5) { this.state = 'wander'; break; }
         const door = tgt.nx + (tgt.nx < 0.5 ? -0.01 : 0.01);
         this._moveTo(door, tgt.ny + 0.01, dt, 0.000075, false);
-        this.stateMs -= dt;
+        // Note: stateMs is already decremented at the top of update(); do not decrement again here.
         if (Math.abs(this.nx - tgt.nx) < 0.08) {
           tgt.burning = true;
           this.state = 'wander';
@@ -4009,6 +4013,10 @@ function buildReachGrid(GW, GH, excludeId) {
   }
   if (church && church.completion > 0.25)    markRect(church.nx,    50 * s / W, church.ny - BLDG_BACK, church.ny + BLDG_FRONT);
   if (mausoleum && mausoleum.completion > 0.25) markRect(mausoleum.nx, 52 * s / W, mausoleum.ny - BLDG_BACK, mausoleum.ny + BLDG_FRONT);
+  for (const g of kitchenGardens) {
+    if (!g.built) continue;
+    markRect(g.nx, 24 * s / W, g.ny - 0.068, g.ny + 0.008);
+  }
   return grid;
 }
 
@@ -4035,10 +4043,12 @@ function findBlockingHouse() {
   const GW = 120, GH = 80;
   // Base reachability (no exclusions)
   const baseGrid = buildReachGrid(GW, GH, null);
-  // Find a valid start cell near bottom-left
+  // Find a valid start cell by scanning the bottom two rows left-to-right
   let startIdx = -1;
-  for (const [sx, sy] of [[5,GH-5],[10,GH-5],[5,GH-10],[10,GH-10]]) {
-    if (!baseGrid[sy * GW + sx]) { startIdx = sy * GW + sx; break; }
+  outer: for (let sy = GH - 2; sy >= GH - 4; sy--) {
+    for (let sx = 0; sx < GW; sx++) {
+      if (!baseGrid[sy * GW + sx]) { startIdx = sy * GW + sx; break outer; }
+    }
   }
   if (startIdx < 0) return null;
   const startGx = startIdx % GW, startGy = (startIdx / GW) | 0;
@@ -4080,7 +4090,7 @@ function findBlockingHouse() {
 }
 
 function checkMob(dt) {
-  if (houses.length < 4) return;
+  if (houses.length < 3) return;
   nextMobCheckMs -= dt;
   if (nextMobCheckMs > 0) return;
   nextMobCheckMs = 60000 + Math.random() * 60000; // recheck in 1-2 min
