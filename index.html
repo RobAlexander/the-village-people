@@ -955,8 +955,9 @@ function pathDetour(nx, ny, tnx, tny) {
     const xAt  = nx + t * (tnx - nx);
     if (xAt <= r.cx - r.halfW || xAt >= r.cx + r.halfW) continue; // path misses in x
 
-    // Path is blocked. Waypoint placed past the far face so the onward leg is clear.
-    const wpNy    = ny > r.y2 ? r.y1 - MARGIN : r.y2 + MARGIN;
+    // Path is blocked. Waypoint at the near face + side offset so the path to the
+    // waypoint doesn't cross through the building (far-face caused oscillation with avoidBldgs).
+    const wpNy    = ny > r.y2 ? r.y2 + MARGIN : r.y1 - MARGIN;
     const leftNx  = r.cx - r.halfW - MARGIN;
     const rightNx = r.cx + r.halfW + MARGIN;
     const dLeft   = Math.hypot(leftNx  - nx, wpNy - ny) + Math.hypot(tnx - leftNx,  tny - wpNy);
@@ -1227,7 +1228,8 @@ class Villager {
         break;
 
       case 'church':
-        this._moveTo(this.tnx, this.tny, dt, 0.000080, true);
+        if (Math.hypot(this.tnx - this.nx, this.tny - this.ny) > 0.07)
+          this._moveTo(this.tnx, this.tny, dt, 0.000080, true);
         if (!isSunday) this._pickTarget();
         break;
 
@@ -1237,6 +1239,7 @@ class Villager {
         break;
 
       case 'going_home': {
+        if (this.stateMs <= 0) { this.state = 'sleep'; break; }
         const _gh = houses.find(h => h.id === this.homeId);
         if (!_gh || _gh.completion < 0.5) { this.state = 'sleep'; break; }
         const _doorNy = bldgDoorNy(_gh.ny);
