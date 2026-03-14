@@ -957,7 +957,8 @@ function pathDetour(nx, ny, tnx, tny) {
 
     // Path is blocked. Waypoint at the near face + side offset so the path to the
     // waypoint doesn't cross through the building (far-face caused oscillation with avoidBldgs).
-    const wpNy    = ny > r.y2 ? r.y2 + MARGIN : r.y1 - MARGIN;
+    // Use >= so that villagers pushed exactly to r.y2 by avoidBldgs get the correct branch.
+    const wpNy    = ny >= r.y2 ? r.y2 + MARGIN : r.y1 - MARGIN;
     const leftNx  = r.cx - r.halfW - MARGIN;
     const rightNx = r.cx + r.halfW + MARGIN;
     const dLeft   = Math.hypot(leftNx  - nx, wpNy - ny) + Math.hypot(tnx - leftNx,  tny - wpNy);
@@ -1370,6 +1371,19 @@ class Villager {
     if (Math.random() < 0.25) {
       const tp = trackBiasTarget();
       if (tp) { this.tnx = tp.nx; this.tny = tp.ny; }
+    }
+    // Nudge wander target out of building footprints to avoid oscillation on arrival.
+    { const _s = H / 600;
+      const _all = [...houses.map(h => ({ cx: h.nx, hw: 31*h.widthScale*_s/W, y1: h.ny-BLDG_BACK, y2: h.ny+BLDG_FRONT, skip: h.completion < 0.25 })),
+                    ...(church && church.completion > 0.25 ? [{ cx: church.nx, hw: 50*_s/W, y1: church.ny-BLDG_BACK, y2: church.ny+BLDG_FRONT, skip: false }] : []),
+                    ...kitchenGardens.filter(g => g.built).map(g => ({ cx: g.nx, hw: 24*_s/W, y1: g.ny-0.068, y2: g.ny+0.008, skip: false }))];
+      for (const r of _all) {
+        if (r.skip) continue;
+        if (this.tnx >= r.cx - r.hw - 0.01 && this.tnx <= r.cx + r.hw + 0.01 &&
+            this.tny > r.y1 - 0.01 && this.tny < r.y2 + 0.01) {
+          this.tny = r.y2 + 0.03;
+        }
+      }
     }
     if (this.holdHandMs > 0) return;  // don't break away to build while holding hands
     if (this.homeId !== null && this.age !== 'child' && !this.isPriest) {
@@ -3989,8 +4003,13 @@ function devCommand(raw) {
   } else if (cmd === 'reach') {
     msg = checkReachability();
   } else if (cmd === 'mob') {
+    mobTargetId = null;
     nextMobCheckMs = 0;
-    msg = 'Mob check forced — will run next frame';
+    // Also force-pick a fallback target if reachability check finds nothing
+    const _forceH = findBlockingHouse() ||
+      houses.filter(h => h.completion >= 0.5 && !h.burning).sort((a,b) => a.id - b.id)[Math.floor(houses.length / 2)];
+    if (_forceH) { mobTargetId = _forceH.id; nextMobCheckMs = 999999; }
+    msg = _forceH ? `Mob targeting house ${_forceH.id}` : 'No eligible house found';
   } else if (cmd === 'help') {
     msg = 'wolf  bear  wizard  ghost  ferret  bell  mausoleum  kill  enchant  day N  tod N  reach  mob';
   } else if (cmd) {
@@ -4002,7 +4021,7 @@ function devCommand(raw) {
 function buildReachGrid(GW, GH, excludeId) {
   const grid = new Uint8Array(GW * GH);
   const s = H / 600;
-  const MARGIN = 0.01;
+  const MARGIN = 0.03;  // coarse margin: small inter-building gaps count as blocked
   const markRect = (cx, halfW, y1, y2) => {
     const gx1 = Math.max(0, Math.floor((cx - halfW - MARGIN) * GW));
     const gx2 = Math.min(GW - 1, Math.ceil((cx + halfW + MARGIN) * GW));
@@ -4043,7 +4062,7 @@ function bfsReach(grid, GW, GH, startGx, startGy) {
 }
 
 function findBlockingHouse() {
-  const GW = 120, GH = 80;
+  const GW = 40, GH = 25;  // coarse grid: small gaps between buildings register as blocked
   // Base reachability (no exclusions)
   const baseGrid = buildReachGrid(GW, GH, null);
   // Find a valid start cell by scanning the bottom two rows left-to-right
