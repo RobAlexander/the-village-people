@@ -680,9 +680,9 @@ class House {
         const fx = cx + (i / 4 - 0.5) * hw * 1.6;
         const wob = Math.sin(now * 0.006 + i * 1.3) * 6 * s;
         const fh  = flameH * (0.6 + 0.4 * Math.sin(now * 0.004 + i * 2.1));
-        poly([fx - 8 * s, baseY, fx + 8 * s, baseY, fx + wob * 0.5, baseY - fh * 0.6, fx + wob, baseY - fh], '#ff6600');
+        poly([[fx - 8*s, baseY], [fx + 8*s, baseY], [fx + wob*0.5, baseY - fh*0.6], [fx + wob, baseY - fh]], '#ff6600');
         ctx.globalAlpha = 0.45;
-        poly([fx - 5 * s, baseY, fx + 5 * s, baseY, fx + wob * 0.3, baseY - fh * 0.4, fx + wob * 0.5, baseY - fh * 0.75], '#ffdd00');
+        poly([[fx - 5*s, baseY], [fx + 5*s, baseY], [fx + wob*0.3, baseY - fh*0.4], [fx + wob*0.5, baseY - fh*0.75]], '#ffdd00');
         ctx.globalAlpha = 0.82;
       }
       // Smoke puffs above
@@ -1594,9 +1594,9 @@ class Villager {
       // Flame
       const now = Date.now();
       ctx.globalAlpha = 0.9;
-      poly([armX - 4 * s, armY - 18 * s, armX + 4 * s, armY - 18 * s, armX + 2 * s, armY - 28 * s, armX, armY - 32 * s, armX - 2 * s, armY - 28 * s], '#ff6600');
+      poly([[armX - 4*s, armY - 18*s], [armX + 4*s, armY - 18*s], [armX + 2*s, armY - 28*s], [armX, armY - 32*s], [armX - 2*s, armY - 28*s]], '#ff6600');
       ctx.globalAlpha = 0.7;
-      poly([armX - 2 * s, armY - 20 * s, armX + 2 * s, armY - 20 * s, armX, armY - 30 * s], '#ffdd00');
+      poly([[armX - 2*s, armY - 20*s], [armX + 2*s, armY - 20*s], [armX, armY - 30*s]], '#ffdd00');
       ctx.globalAlpha = 1;
     }
     // Head
@@ -2663,7 +2663,7 @@ class Ruin {
     // Charred rubble — low pile of dark polygons
     ctx.globalAlpha = 1;
     // Base ash layer
-    poly([cx - hw, cy, cx + hw, cy, cx + hw * 0.8, cy - 6 * s, cx - hw * 0.8, cy - 6 * s], dimHex('#2a2520', t));
+    poly([[cx - hw, cy], [cx + hw, cy], [cx + hw*0.8, cy - 6*s], [cx - hw*0.8, cy - 6*s]], dimHex('#2a2520', t));
     // Charred timber chunks
     const seed = this.nx * 1000 | 0;
     for (let i = 0; i < 5; i++) {
@@ -2675,7 +2675,7 @@ class Ruin {
     // Chimney stump
     box(cx + hw * 0.3, cy - 14 * s, 5 * s, 14 * s, dimHex('#5a4030', t));
     // Ash / soot overlay
-    poly([cx - hw * 0.9, cy + 1, cx + hw * 0.9, cy + 1, cx + hw * 0.7, cy - 4 * s, cx - hw * 0.7, cy - 4 * s], dimHex('#3a3028', t * 0.6));
+    poly([[cx - hw*0.9, cy + 1], [cx + hw*0.9, cy + 1], [cx + hw*0.7, cy - 4*s], [cx - hw*0.7, cy - 4*s]], dimHex('#3a3028', t * 0.6));
   }
 }
 
