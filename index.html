@@ -1332,7 +1332,7 @@ class Villager {
         const door = tgt.nx + (tgt.nx < 0.5 ? -0.01 : 0.01);
         this._moveTo(door, tgt.ny + 0.01, dt, 0.000075, false);
         // Note: stateMs is already decremented at the top of update(); do not decrement again here.
-        if (Math.abs(this.nx - tgt.nx) < 0.08) {
+        if (Math.hypot(this.nx - tgt.nx, this.ny - (tgt.ny + 0.01)) < 0.07) {
           tgt.burning = true;
           this.state = 'wander';
         } else if (this.stateMs <= 0) {
@@ -4004,12 +4004,18 @@ function devCommand(raw) {
     msg = checkReachability();
   } else if (cmd === 'mob') {
     mobTargetId = null;
-    nextMobCheckMs = 0;
-    // Also force-pick a fallback target if reachability check finds nothing
     const _forceH = findBlockingHouse() ||
       houses.filter(h => h.completion >= 0.5 && !h.burning).sort((a,b) => a.id - b.id)[Math.floor(houses.length / 2)];
-    if (_forceH) { mobTargetId = _forceH.id; nextMobCheckMs = 999999; }
-    msg = _forceH ? `Mob targeting house ${_forceH.id}` : 'No eligible house found';
+    if (_forceH) {
+      mobTargetId = _forceH.id;
+      nextMobCheckMs = 999999;
+      const _cands = villagers.filter(v => v.state === 'wander' && v.age === 'adult' && !v.isPriest && !v.handPartnerId);
+      const _n = Math.min(_cands.length, 3 + Math.floor(Math.random() * 3));
+      _cands.slice(0, _n).forEach(v => { v.state = 'mob'; v.stateMs = 120000; });
+      msg = `Mob: ${_n} villagers targeting house ${_forceH.id}`;
+    } else {
+      msg = 'No eligible house found';
+    }
   } else if (cmd === 'help') {
     msg = 'wolf  bear  wizard  ghost  ferret  bell  mausoleum  kill  enchant  day N  tod N  reach  mob';
   } else if (cmd) {
