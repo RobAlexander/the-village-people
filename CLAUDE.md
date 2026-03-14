@@ -43,11 +43,11 @@ All code lives in `index.html` as one IIFE. Sections are marked with `// ── 
 
 ## Draw Helpers
 
-- `poly(pts, fill)` — filled polygon
+- `poly(pts, fill)` — filled polygon; `pts` is **always `[[x,y],[x,y],...]`** (array of pairs, never a flat array)
 - `box(x, y, w, h, fill)` — filled rect
 - `disk(x, y, r, fill)` — filled circle
 - `cap(x, y, r, fill)` — filled semicircle (top half — used for hair)
-- `noisyPoly(pts, seed, amp, fill)` — polygon with **seeded** per-vertex perturbation (no per-frame flicker)
+- `noisyPoly(pts, seed, amp, fill)` — polygon with **seeded** per-vertex perturbation (no per-frame flicker); also uses array-of-pairs format
 - `noisyBox(...)` — 8-point box with seeded noise
 - `srand(seed, i)` / `hash(n)` — deterministic noise source
 
@@ -80,6 +80,14 @@ Drawn every frame in `drawBackground()`:
 - **Chimney smoke** (3 disks, semi-transparent) appears when `light < 0.45` and chimney is complete
 - **Windows** lit amber (`WIN_LIT`) when `light < 0.35`, blue-grey (`WIN_DAY`) otherwise
 - **Mature flora** — after `ageMs > 300 000 ms`, roses (62% chance) and window flower boxes (58% chance) fade in, seeded per house
+- **Burning**: `burning` flag + `burnProgress` 0→1 (over 45 s real time). While burning, `update()` returns early after advancing progress. `fireSoundPlayed` flag ensures `playFireCrackle()` fires only once. Fire overlay: 5 animated flame tongues + 3 smoke puffs drawn on top of the normal house render
+
+### `Ruin`
+- Created by `checkBurning()` when a burning house reaches `burnProgress >= 1`
+- Draws charred rubble: ash base polygon, 5 seeded timber chunks, chimney stump, soot overlay
+- **Passable** — not included in `avoidBldgs` or `pathDetour`; ground-level only
+- New houses cannot be assigned within ~0.13 nx / 0.06 ny of a ruin (`assignHome` skip check)
+- Persisted under key `ru`; `widthScale` preserved so ruin matches former house footprint
 
 ### `Church`
 - Spawned when non-priest adults ≥ `CHURCH_POP (10)`
@@ -108,6 +116,7 @@ Drawn every frame in `drawBackground()`:
 - `harvest()`: resets all `stolen` flags and `growMs` to 0 (resident villager calls this)
 - **Rabbits** can steal one row per visit when `hasRipeVeg` is true; rabbit carries `robGardenId` during the hop
 - **Draw**: cream picket fence (`#deded0`) with gate gap in front rail; 3 soil rows; 4 vegetables per row scaled by `√growFrac` — carrot (orange triangle + green shoots), cabbage (flat green ellipse), turnip (white disk + purple cap + green tuft); stolen rows draw nothing
+- Included in `avoidBldgs` and `pathDetour` as obstacles (dimensions: halfW = `24*s/W`, y1 = `ny−0.068`, y2 = `ny+0.008`)
 - Persisted in localStorage under key `kg`
 
 ### `Villager`
@@ -118,13 +127,16 @@ Drawn every frame in `drawBackground()`:
 - Hair colours: brown or blonde (random at spawn), priest has grey, old has white (`#e8e8e0`)
 - **Wizard enchantment**: `skinColor` and `shirtColor` fields (normally null = defaults); set when the Wizard passes within 0.12 nx; persisted as `sc`/`stc`
 - **Fertility**: each adult starts with 1–7 children (bell-curve random); each birth decrements both parents' fertility by 1. No more children when either partner reaches 0.
-- **States**: `arrive` · `wander` · `going_home` · `build` · `build_church` · `build_garden` · `build_mausoleum` · `harvest` · `sleep` · `church` · `flee` · `dead` · `being_carried` · `at_grave` · `buried` · `funeral` · `fetch_body` · `carry_body` · `emigrate`
+- **States**: `arrive` · `wander` · `going_home` · `build` · `build_church` · `build_garden` · `build_mausoleum` · `harvest` · `sleep` · `church` · `flee` · `dead` · `being_carried` · `at_grave` · `buried` · `funeral` · `fetch_body` · `carry_body` · `emigrate` · `mob`
 - Old people walk slower (speed 0.000038 vs 0.000055); drawn with a walking stick
-- **Evening routine**: at `tod() > 0.70`, wandering villagers with `handPartnerId === null` and a completed house (completion > 0.5) enter `going_home` and walk to the house door position at `going_home` speed (old=0.000042, non-old=0.000065 — faster than wander). They appear at the door at dawn and emerge normally. Villagers in `going_home` are immune to ghost flee and Sunday church redirect (but NOT wolf/bear flee).
+- **Evening routine**: at `tod() > 0.70`, wandering villagers with `handPartnerId === null` and a completed house (completion > 0.5) enter `going_home` and walk to the house door position at `going_home` speed (old=0.000042, non-old=0.000065 — faster than wander). `going_home` has a stateMs timeout (99999 ms) — falls back to `sleep` if unreachable. Villagers in `going_home` are immune to ghost flee and Sunday church redirect (but NOT wolf/bear flee).
 - `going_home` is a transitory state — saved as `wander` in the cookie
-- On Sundays (every 7th day, t=0.25–0.42), all non-sleeping/non-dead/non-going_home villagers walk to church
-- **Building avoidance**: `avoidBldgs(nx, ny)` pushes villagers in ny only; applied in `_moveTo` when `avoid=true`. Enabled for `wander` and `church` states. Build/going_home/flee states skip avoidance (they need to reach the building). Each building occupies `ny ∈ [doorNy − BLDG_BACK, doorNy + BLDG_FRONT]` where `BLDG_BACK = 0.044` (depth behind door) and `BLDG_FRONT = 0.006` (doorstep buffer). Resolution pushes to the nearest face. House halfW = `31 * widthScale * s / W`; church = `50 * s / W`; mausoleum = `52 * s / W`.
+- On Sundays (every 7th day, t=0.25–0.42), all non-sleeping/non-dead/non-going_home/non-mob villagers walk to church; stop moving when within 0.07 of church
+- **Building avoidance**: `avoidBldgs(nx, ny, prevNy)` pushes villagers in ny only; applied in `_moveTo` when `avoid=true`. Includes houses, church, mausoleum, kitchen gardens, pond. Each house occupies `ny ∈ [ny − BLDG_BACK, ny + BLDG_FRONT]` where `BLDG_BACK = 0.044` and `BLDG_FRONT = 0.006`.
+- **Pathfinding**: `pathDetour(nx, ny, tnx, tny)` — called each frame from `_moveTo` when `avoid=true`. Detects first obstacle whose ny range the straight-line path crosses. Returns a corner waypoint at the **near face** (south face + MARGIN if approaching from south, north face − MARGIN if from north) plus left/right offset, so the path to the waypoint never crosses the building. `avoidBldgs` then prevents ny penetration. States that intentionally target a building (`build`, `going_home`, `church`, `mob`) skip their own target building via an intentional-approach check. `funeral`, `fetch_body`, `carry_body` use `avoid=false` to approach bodies directly.
+- **`_pickTarget()`**: clamps random wander targets out of building footprints to prevent oscillation
 - **Walking animation**: sine-based leg sway (`gameTime * 0.0055 + id * 2.3`), per-villager phase offset; arms counter-swing at 0.5× amplitude. Active in all moving states including `build_garden`, `harvest`, and `build_mausoleum`. `build_garden` and `build_mausoleum` also use raised-arm building pose. Skirt and building-pose arms are static.
+- **Mob state**: villager walks toward `mobTargetId` house at speed 0.000075 with `avoid=false`; carries a visible flaming torch; ignites house (sets `burning = true`) on arrival within 0.07 distance; times out after 120 s if unable to reach. Immune to Sunday church redirect.
 - **Emigrate state**: when population exceeds 25 non-priest adults, `checkEmigration()` fires once per morning (tod 0.27–0.52). Excess adults can leave — childless/solo adults leave first. Leaver walks off-screen pushing a loaded handcart; removed from `villagers[]` on exit. Count tracked in `leaverCount`.
 - Drawn with `noisyPoly`; seeded by `this.id` so shape is stable per villager
 
@@ -235,8 +247,8 @@ Drawn every frame in `drawBackground()`:
 ### Death & Graveyard
 - When an old villager dies, `_die()` is called: releases hand-hold, clears `partnerId` on surviving partner, sets state to `dead`
 - `updateDeaths()` (called each frame after updates): assigns a free wandering adult as carrier (`fetch_body` → `carry_body`). **Dead priests are skipped** — their body is handled by the angel sequence instead.
-- Carrier walks to body, picks it up (`being_carried`), carries it slowly to graveyard zone
-- `depositBody()`: body transitions to `at_grave` for 15–25 s; up to 4 nearby wanderers become `funeral` mourners
+- Carrier walks to body, picks it up (`being_carried`), carries it slowly to graveyard zone. `fetch_body` and `carry_body` use `avoid=false` so carriers can approach bodies near buildings.
+- `depositBody()`: body transitions to `at_grave` for 15–25 s; up to 4 nearby wanderers become `funeral` mourners (also `avoid=false`)
 - After `at_grave` timer expires, a grave cross is pushed to `graveyard.crosses` and state becomes `buried`; `updateDeaths()` removes `buried` from the array
 - **Graveyard** (`let graveyard`): auto-created on first death at `{nx: church.nx-0.22, ny: church.ny+0.08}` or default `{0.12, 0.45}`; also tracks `totalDead` (cumulative, including absorbed by mausoleum)
 - **Grave crosses**: white polygon cross (`#d8d0bc`), drawn in painter's-algorithm layer, sorted by `sy`
@@ -259,12 +271,42 @@ Drawn every frame in `drawBackground()`:
 
 ---
 
+## Mob, Burning & Ruins
+
+### Mob trigger
+- `checkMob(dt)` fires on a 1–2 minute timer (global `nextMobCheckMs`)
+- Uses `findBlockingHouse()`: BFS on a **40×25 coarse grid** (MARGIN=0.03) to detect if any house's approach point is unreachable from the bottom of the screen when another house is present. Coarse grid makes small inter-building gaps register as blocked.
+- `buildReachGrid(GW, GH, excludeId)` marks all buildings (including kitchen gardens) as blocked; `bfsReach()` does 8-connected flood fill
+- If a blocker is found, 2–5 wandering adults are put in `mob` state targeting `mobTargetId`
+- **Dev console `mob` command**: immediately targets a house (blocking house or mid-list fallback) and recruits 3–6 mob members
+
+### Mob state
+- Mob villagers walk to the target house with `avoid=false` at speed 0.000075
+- Draw a flaming torch (stick + orange/yellow flame polygons) above one arm
+- Ignite house (`burning = true`) on arrival within 0.07 distance
+- `playMobChant()` fires every 5–9 s while any mob villager is active: 5 detuned sawtooth oscillators (95–190 Hz) with 3.2 Hz rhythmic LFO
+
+### Burning
+- Burning house: `burnProgress` advances at `dt / 45000` (45 s to burn down)
+- Fire overlay: 5 animated flame tongues (orange + yellow, Date.now()-driven wobble) + 3 smoke puffs
+- `playFireCrackle()` fires once on first burning frame: 20 s of white noise split into bandpass crackle (900 Hz) + lowpass roar (180 Hz)
+
+### Collapse & ruin
+- `checkBurning()`: when `burnProgress >= 1`, calls `playCollapseSound()` then creates a `Ruin`
+- `playCollapseSound()`: white noise swept 4000→60 Hz over 2.2 s + sine boom 100→28 Hz
+- Ruin: charred rubble drawn in painter's-algorithm layer; passable (not in avoidBldgs/pathDetour)
+- House residents displaced (`homeId = null`, re-assigned via `assignHome`)
+- Associated kitchen garden removed; `mobTargetId` cleared
+- New houses blocked from placing within 0.13 nx / 0.06 ny of any ruin
+
+---
+
 ## Spawning & Population
 
 - **First batch**: 4 adults arrive quickly (every 12–27 s), alternating m/f
 - **Subsequent arrivals**: one adult every 70–180 s of game-time
 - **Child production**: any two cohabiting non-priest adults (any gender combination) with fertility > 0 produce a child; the lower-id adult owns the timer. Initial timer: 60–150 s game-time; subsequent births: 60–180 s. The higher-id adult's presence enables it. Each birth decrements both partners' `fertility` by 1.
-- `assignHome`: villager takes a free slot in an existing house (max 2 non-child adults), or founds a new one and enters `build` state
+- `assignHome`: villager takes a free slot in an existing house (max 2 non-child adults), or founds a new one and enters `build` state. New houses skip positions within 0.13 nx / 0.06 ny of any ruin.
 - At population 10 non-priest adults: church is spawned and a priest villager is added
 - When the priest dies, the angel sequence runs (~78 s); a replacement priest walks in the following morning (see Priest Death — Angel Sequence)
 - **Emigration**: checked once per morning (tod 0.27–0.52). If non-priest adults > 25, excess adults may leave (`emigrate` state), pushing a handcart off-screen. Childless/solo adults leave preferentially. Tracked in `leaverCount`.
@@ -280,6 +322,9 @@ All sound via Web Audio API, lazy-initialised (`audioCtx`). Sound is **on by def
 - `playWolfGuitar()` — 4 sine harmonics decaying at `1.4/√h` s; fires periodically while wolf is active
 - `playGhostMoan()` — two detuned sines with LFO vibrato, pitch descends then rises over 4 s; fires periodically while ghost is active
 - `playHeavenlyChorus()` — 5-voice C major 9th chord (C4 E4 G4 C5 E5), each with LFO vibrato, 1 s fade-in, sustain to 3.5 s, fade-out by 5.5 s; fires at sequence start, every 15–23 s during mourning, and once at tomb materialisation
+- `playMobChant()` — 5 detuned sawtooth oscillators (95–190 Hz) with 3.2 Hz rhythmic AM LFO; 2.8 s duration; fires every 5–9 s while mob is active
+- `playFireCrackle()` — 20 s white noise through bandpass (900 Hz crackle) + lowpass (180 Hz roar), slow fade-in/fade-out; fires once when a house starts burning
+- `playCollapseSound()` — white noise swept 4000→60 Hz + sine boom 100→28 Hz, ~3.8 s; fires when a burning house collapses
 
 ---
 
@@ -294,7 +339,9 @@ All sound via Web Audio API, lazy-initialised (`audioCtx`). Sound is **on by def
 
 - **Backtick (`` ` ``) key** toggles a green dev overlay (top-left)
 - Shows live stats: tod, gameTime, villager count, per-state counts, wolf/bear/ghost/wizard status, church ageMs/upgrades, grave count, mausoleum elaborateness
-- Commands: `wolf` `bear` `wizard` `ghost` `ferret` `bell` `mausoleum` `kill` `enchant` `day N` `tod N` `help`
+- Commands: `wolf` `bear` `wizard` `ghost` `ferret` `bell` `mausoleum` `kill` `enchant` `day N` `tod N` `reach` `mob` `help`
+- `reach` — runs BFS reachability check, reports any blocked house approach points
+- `mob` — immediately recruits a mob targeting a blocking house (or mid-list house as fallback)
 
 ---
 
@@ -302,7 +349,7 @@ All sound via Web Audio API, lazy-initialised (`audioCtx`). Sound is **on by def
 
 - `saveState()` / `loadState()` — serialise/restore full game state to `localStorage` key `vs` every 14 s
 - JSON encoded; gracefully ignores missing/corrupt data
-- Persisted: `gameTime`, `arrivalCount`, `nextArrivalMs`, `nextId`, `leaverCount`, all villagers (dead/buried excluded, transitory states reverted to wander), all houses (including `ageMs`, `extensions`, `extProgress`, `extPending`, `animalsGiven` as key `ag`), church (including `ageMs`, `lastBellDay`), graveyard (position + crosses + `totalDead` under key `gy`), mausoleum (key `ml`), priest tomb (key `pt`), priest respawn pending flag (key `pr`), kitchen gardens (`kg`), ground track wear (`trkW`: sparse index→value) and pave (`trkP`: sparse index→value)
+- Persisted: `gameTime`, `arrivalCount`, `nextArrivalMs`, `nextId`, `leaverCount`, all villagers (dead/buried excluded, transitory states reverted to wander, `mob` saved as `wander`), all houses (including `ageMs`, `extensions`, `extProgress`, `extPending`, `animalsGiven` as key `ag`, burning state as `bn`/`bp`), church (including `ageMs`, `lastBellDay`), graveyard (position + crosses + `totalDead` under key `gy`), mausoleum (key `ml`), priest tomb (key `pt`), priest respawn pending flag (key `pr`), kitchen gardens (`kg`), ground track wear (`trkW`: sparse index→value) and pave (`trkP`: sparse index→value), ruins (`ru`: array of `{nx, ny, ws}`)
 - Villager fields persisted include `partnerId`, `fertility`, `skinColor`, `shirtColor`
 - Farm animals are **not** stored directly — `farmAnimals[]` is rebuilt from houses where `animalsGiven === true` on load
 - Pond persisted under key `po` (`nx, ny, rx, ry`); ducks are **not** persisted — rebuilt from pond data on load
@@ -324,12 +371,13 @@ Order per frame:
 6. `checkMausoleum()` — triggers mausoleum if graves ≥ 100; then update mausoleum if it exists
 7. `updatePriestSequence(dt)` — advances the angel sequence state machine; updates angel positions
 8. `updateDeaths()` — assign carriers to dead bodies (skipping dead priests); remove `buried` and off-screen `emigrate` villagers
-9. `drawBackground()` — sky, stars, sun/moon, ground, trees, grass
-10. Build `drawables` array — houses + kitchenGardens + church + mausoleum + priestTomb + villagers + wizard + wolf + ferret + bear + ghost + groundBirds + rabbits + farmAnimals + pond + ducks + grave crosses — sort by `sy` (painter's algorithm)
-11. Draw sorted ground entities — each drawable wrapped in its own try/catch; a failing draw logs to console, resets `globalAlpha`, and does **not** abort the remaining drawables
-12. Draw angels (above ground entities, below birds)
-13. Draw sky entities on top: birds, dragon
-14. `updatePanel()` / `updateDevCon()` — refresh overlays if open
+9. `checkMob(dt)` — timer-based mob recruitment; `checkBurning()` — convert burned-out houses to ruins; mob sound timer tick
+10. `drawBackground()` — sky, stars, sun/moon, ground, trees, grass
+11. Build `drawables` array — ruins + houses + kitchenGardens + church + mausoleum + priestTomb + villagers + wizard + wolf + ferret + bear + ghost + groundBirds + rabbits + farmAnimals + pond + ducks + grave crosses — sort by `sy` (painter's algorithm)
+12. Draw sorted ground entities — each drawable wrapped in its own try/catch; a failing draw logs to console, resets `globalAlpha`, and does **not** abort the remaining drawables
+13. Draw angels (above ground entities, below birds)
+14. Draw sky entities on top: birds, dragon
+15. `updatePanel()` / `updateDevCon()` — refresh overlays if open
 
 ---
 
@@ -339,8 +387,9 @@ Order per frame:
 - Canvas-based 2D polygon rendering only (no images, no sprites, no CSS animations)
 - ~256 distinct colours in the palette (defined in `const C = { ... }`)
 - Day/night cycle: 2 minutes per full cycle (`DAY_MS = 120000`)
-- All sounds quiet (max gain ≈ 0.06); Web Audio only, no audio files
+- All sounds quiet (max gain ≈ 0.07); Web Audio only, no audio files
 - Responsive: all sizing derived from `W` and `H`, recomputed on `resize` event
 - State persistence via `localStorage` across page reloads
 - `noisyPoly` perturbation must always use a **fixed seed** — never `Math.random()` — to prevent per-frame flicker
 - `ctx.ellipse()` radii must be guarded against zero (e.g. `if (gs > 0)` before cabbage draw) — zero-radius ellipse throws a `DOMException` in most browsers
+- `poly(pts, fill)` expects `[[x,y],...]` — **never pass a flat array** `[x,y,x,y,...]`; this throws silently in the drawable try/catch, making the entity invisible
