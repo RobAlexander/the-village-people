@@ -498,8 +498,9 @@ class House {
     this.extProgress = 0;     // 0→1 build progress of current extension
     this.extPending  = false; // is an extension actively being built?
     this.animalsGiven = false; // farm animals spawned for this house?
-    this.burning     = false;
-    this.burnProgress = 0;
+    this.burning        = false;
+    this.burnProgress   = 0;
+    this.fireSoundPlayed = false;
   }
   get sy() { return worldY(this.ny); }
 
@@ -535,7 +536,10 @@ class House {
   }
 
   update(dt) {
-    if (this.burning) { this.burnProgress = Math.min(1, this.burnProgress + dt / 45000); return; }
+    if (this.burning) {
+      if (!this.fireSoundPlayed) { this.fireSoundPlayed = true; playFireCrackle(); }
+      this.burnProgress = Math.min(1, this.burnProgress + dt / 45000); return;
+    }
     if (this.completion >= 1) {
       this.ageMs += dt;
       // Extension progress — any resident in 'build' state near the house contributes.
@@ -3215,6 +3219,112 @@ function playGrow() {
   } catch(_) {}
 }
 
+function playMobChant() {
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    const dur = 2.8;
+    const env = audioCtx.createGain();
+    env.gain.setValueAtTime(0, now);
+    env.gain.linearRampToValueAtTime(1, now + 0.25);
+    env.gain.setValueAtTime(1, now + 2.0);
+    env.gain.linearRampToValueAtTime(0, now + dur);
+    env.connect(audioCtx.destination);
+    // Rhythmic LFO — aggressive chanting pulse at ~3 Hz
+    const lfo = audioCtx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 3.2;
+    const lfoG = audioCtx.createGain();
+    lfoG.gain.value = 0.010;
+    lfo.connect(lfoG);
+    lfo.start(now); lfo.stop(now + dur);
+    // Crowd-voice oscillators: low sawtooth harmonics
+    [95, 110, 130, 160, 190].forEach((f, i) => {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = f + i * 0.4;
+      const og = audioCtx.createGain();
+      og.gain.value = 0.007;
+      lfoG.connect(og.gain);
+      osc.connect(og); og.connect(env);
+      osc.start(now); osc.stop(now + dur);
+    });
+  } catch(e) {}
+}
+
+function playFireCrackle() {
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    const dur = 20;
+    // White noise buffer
+    const bufLen = Math.floor(audioCtx.sampleRate * dur);
+    const buf = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) d[i] = Math.random() * 2 - 1;
+    // High crackle band
+    const src1 = audioCtx.createBufferSource(); src1.buffer = buf;
+    const bpf = audioCtx.createBiquadFilter();
+    bpf.type = 'bandpass'; bpf.frequency.value = 900; bpf.Q.value = 0.6;
+    const cracklG = audioCtx.createGain();
+    cracklG.gain.setValueAtTime(0, now);
+    cracklG.gain.linearRampToValueAtTime(0.032, now + 2);
+    cracklG.gain.setValueAtTime(0.032, now + 16);
+    cracklG.gain.linearRampToValueAtTime(0, now + dur);
+    src1.connect(bpf); bpf.connect(cracklG); cracklG.connect(audioCtx.destination);
+    src1.start(now);
+    // Low roar band
+    const src2 = audioCtx.createBufferSource(); src2.buffer = buf;
+    const lpf = audioCtx.createBiquadFilter();
+    lpf.type = 'lowpass'; lpf.frequency.value = 180;
+    const roarG = audioCtx.createGain();
+    roarG.gain.setValueAtTime(0, now);
+    roarG.gain.linearRampToValueAtTime(0.028, now + 3);
+    roarG.gain.setValueAtTime(0.028, now + 16);
+    roarG.gain.linearRampToValueAtTime(0, now + dur);
+    src2.connect(lpf); lpf.connect(roarG); roarG.connect(audioCtx.destination);
+    src2.start(now);
+  } catch(e) {}
+}
+
+function playCollapseSound() {
+  if (!soundEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    const dur = 3.8;
+    const bufLen = Math.floor(audioCtx.sampleRate * dur);
+    const buf = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) d[i] = Math.random() * 2 - 1;
+    // Crash: noise swept down through a lowpass
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const filt = audioCtx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.setValueAtTime(4000, now);
+    filt.frequency.exponentialRampToValueAtTime(60, now + 2.2);
+    const crashG = audioCtx.createGain();
+    crashG.gain.setValueAtTime(0.07, now);
+    crashG.gain.linearRampToValueAtTime(0.05, now + 0.4);
+    crashG.gain.linearRampToValueAtTime(0, now + dur);
+    src.connect(filt); filt.connect(crashG); crashG.connect(audioCtx.destination);
+    src.start(now);
+    // Deep boom: sine sweeping from 100 Hz → 28 Hz
+    const boom = audioCtx.createOscillator();
+    boom.type = 'sine';
+    boom.frequency.setValueAtTime(100, now);
+    boom.frequency.exponentialRampToValueAtTime(28, now + 1.4);
+    const boomG = audioCtx.createGain();
+    boomG.gain.setValueAtTime(0, now);
+    boomG.gain.linearRampToValueAtTime(0.06, now + 0.06);
+    boomG.gain.linearRampToValueAtTime(0, now + 2.0);
+    boom.connect(boomG); boomG.connect(audioCtx.destination);
+    boom.start(now); boom.stop(now + 2.0);
+  } catch(e) {}
+}
+
 function playWolfGuitar() {
   if (!soundEnabled) return;
   try {
@@ -3316,6 +3426,7 @@ let ducks           = [];
 let ruins           = [];    // charred ground-level remains of burned houses
 let mobTargetId     = null;  // house id currently targeted by the mob, or null
 let nextMobCheckMs  = 25000; // countdown before first reachability check
+let mobSoundMs      = 0;     // countdown between mob chant sounds
 let leaverCount     = 0;
 let lastEmigrateDay = -1;
 let arrivalCount = 0;
@@ -3768,6 +3879,11 @@ function loop(ts) {
   houses.forEach(h => h.update(dt));
   checkMob(dt);
   checkBurning();
+  // Mob chant sound — fires every 5–9 s while any villager is in mob state
+  if (villagers.some(v => v.state === 'mob')) {
+    mobSoundMs -= dt;
+    if (mobSoundMs <= 0) { playMobChant(); mobSoundMs = 5000 + Math.random() * 4000; }
+  } else { mobSoundMs = 0; }
   if (church) church.update(dt);
   birds.forEach(b => b.update(dt));
   dragon.update(dt);
@@ -4149,6 +4265,7 @@ function checkMob(dt) {
 function checkBurning() {
   for (const h of houses) {
     if (!h.burning || h.burnProgress < 1) continue;
+    playCollapseSound();
     // Create ruin
     ruins.push(new Ruin(h.nx, h.ny, h.widthScale));
     // Displace residents
